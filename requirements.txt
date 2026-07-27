@@ -1,0 +1,34 @@
+# =============================================================================
+# requirements.txt — Wipe Vision Modules
+# Covers all three variants:
+#   vision_module.py           (Orbbec / pyorbbecsdk)
+#   vision_module_realsense.py (Intel RealSense / pyrealsense2)
+#   vision_module_zivid.py     (Zivid 2i / zivid)
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# IMPORTANT: Three camera SDKs also require system-level installation BEFORE
+# running pip install. See INSTALL_NOTES.md for step-by-step instructions.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Shared — required by all three modules
+# -----------------------------------------------------------------------------
+numpy>=1.24.0
+opencv-python>=4.8.0
+
+# -----------------------------------------------------------------------------
+# vision_module.py — Orbbec Femto / Gemini cameras
+# NOTE: pyorbbecsdk requires the Orbbec SDK (native libs) installed first.
+#       See INSTALL_NOTES.md § Orbbec.
+# -----------------------------------------------------------------------------
+pyorbbecsdk2
+
+# -----------------------------------------------------------------------------
+# vision_module_realsense.py — Intel RealSense D4xx / L515
+# NOTE: On Linux, pyrealsense2 from PyPI bundles its own native libs on most
+#       distros. If it doesn't work, install librealsense2 first.
+#       See INSTALL_NOTES.md § RealSense.
+# -----------------------------------------------------------------------------
+pyrealsense2>=2.54.0

@@ -1,0 +1,6 @@
+.venv
+.venv/*
+Log
+Log/*
+*.pyc
+*.npz
