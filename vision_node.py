@@ -9,7 +9,9 @@ Runs the UI on a background thread and publishes the detected wipe state.
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
+from geometry_msgs.msg import PoseStamped
 import threading
+import sys
 
 # Import your existing generic CV2 module
 import vision_module_cv2
@@ -22,15 +24,29 @@ class WipeVisionNode(Node):
         # We use a standard Float32MultiArray to avoid compiling custom .msg files.
         self.pub_vision = self.create_publisher(Float32MultiArray, '/wipe_state', 10)
         
+        # Subscribe to EEF pose to mask out the robot arm/tool
+        self.sub_eef = self.create_subscription(
+            PoseStamped,
+            '/franka_robot_state_broadcaster/current_pose',
+            self.eef_callback,
+            10
+        )
+        
         # Timer to read the shared vision state and publish it at the control rate
         self.timer = self.create_timer(1.0 / vision_module_cv2.CONTROL_HZ, self.timer_callback)
         
         # Launch the OpenCV window loop in a background thread
         # This allows cv2.imshow() to run without blocking the ROS2 spin loop.
-        self.vision_thread = threading.Thread(target=vision_module_cv2.run_vision_loop, daemon=True)
+        # self.vision_thread = threading.Thread(target=vision_module_cv2.run_vision_loop, daemon=True)
+        cam_index = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+        self.vision_thread = threading.Thread(target=vision_module_cv2.run_vision_loop, kwargs={'cam_index': cam_index}, daemon=True)
         self.vision_thread.start()
         
-        self.get_logger().info("Wipe Vision Node started.")
+        self.get_logger().info(f"Wipe Vision Node started on camera {cam_index}.")
+
+    def eef_callback(self, msg):
+        pos = msg.pose.position
+        vision_module_cv2.vision_state.set_eef_pos([pos.x, pos.y, pos.z])
 
     def timer_callback(self):
         # Retrieve the latest observation from the vision module's thread-safe state

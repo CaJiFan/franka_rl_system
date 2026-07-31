@@ -53,6 +53,17 @@ BOARD_WIDTH_M    = 0.60
 BOARD_HEIGHT_M   = 0.45
 BOARD_DIAGONAL_M = np.sqrt(BOARD_WIDTH_M**2 + BOARD_HEIGHT_M**2)
 
+# ---------------------------------------------------------------------------
+# Robot Base Calibration (Physical 3D locations of the 4 board corners)
+# Measure these by jogging the robot EEF to the corners and reading (X, Y, Z)
+# ---------------------------------------------------------------------------
+ROBOT_CORNERS_BASE = {
+    "TL": np.array([0.5540, -0.1587, 0.1950]), # Top-Left
+    "TR": np.array([0.5449, 0.1771, 0.1950]), # Top-Right
+    "BR": np.array([0.7530, 0.1776, 0.0388]), # Bottom-Right
+    "BL": np.array([0.7591, -0.1556, 0.0424]), # Bottom-Left
+}
+
 # Control loop target
 CONTROL_HZ = 20.0
 
@@ -231,11 +242,19 @@ def compute_ink_obs(mask_01, H_board, task_start_area_px, prev_target_px=None,
     if H_board is not None:
         pt          = np.array([[[cx_px, cy_px]]], dtype=np.float32)
         pt_b        = cv2.perspectiveTransform(pt, H_board)[0, 0]
-        centroid_3d = np.array([
-            pt_b[0] * BOARD_WIDTH_M  - BOARD_WIDTH_M  / 2.0,
-            pt_b[1] * BOARD_HEIGHT_M - BOARD_HEIGHT_M / 2.0,
-            0.0,
-        ])
+        
+        # pt_b[0] is X fraction (0=Left, 1=Right)
+        # pt_b[1] is Y fraction (0=Top, 1=Bottom)
+        # We use Bilinear Interpolation to find the exact 3D point in the robot base frame!
+        TL = ROBOT_CORNERS_BASE["TL"]
+        TR = ROBOT_CORNERS_BASE["TR"]
+        BR = ROBOT_CORNERS_BASE["BR"]
+        BL = ROBOT_CORNERS_BASE["BL"]
+        
+        top_pt = TL + pt_b[0] * (TR - TL)
+        bot_pt = BL + pt_b[0] * (BR - BL)
+        centroid_3d = top_pt + pt_b[1] * (bot_pt - top_pt)
+
         H_inv   = np.linalg.inv(H_board)
         p00     = cv2.perspectiveTransform(np.array([[[0., 0.]]]), H_inv)[0, 0]
         p11     = cv2.perspectiveTransform(np.array([[[1., 1.]]]), H_inv)[0, 0]
@@ -243,11 +262,8 @@ def compute_ink_obs(mask_01, H_board, task_start_area_px, prev_target_px=None,
         radius_m = (radius_px / diag_px) * BOARD_DIAGONAL_M
     else:
         h, w        = mask_01.shape[:2]
-        centroid_3d = np.array([
-            (cx_px / max(w, 1) - 0.5) * BOARD_WIDTH_M,
-            (cy_px / max(h, 1) - 0.5) * BOARD_HEIGHT_M,
-            0.0,
-        ])
+        # Fallback if uncalibrated (just 0s to prevent crash)
+        centroid_3d = np.zeros(3)
         diag_px  = np.sqrt(h**2 + w**2)
         radius_m = (radius_px / max(diag_px, 1.0)) * BOARD_DIAGONAL_M
 
@@ -357,23 +373,28 @@ def nothing(x):
     pass
 
 
-def run_vision_loop(half_frame=False):
+def run_vision_loop(half_frame=False, cam_index=0):
     # ── Camera init ──────────────────────────────────────────────────────────
-    cam_index = 0
-    cap = cv2.VideoCapture(cam_index)
+    # Force V4L2 backend for Linux stability
+    cap = cv2.VideoCapture(cam_index, cv2.CAP_V4L2)
     
     if not cap.isOpened():
         print(f"[VIS] Failed to open camera at index {cam_index}.")
         print("      Try changing `cam_index` in the script if you have multiple cameras.")
         return
 
-    # Typical webcam defaults
+    # Force YUYV format (uncompressed) at a lower 15 FPS to prevent USB bandwidth crashes
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 15)
     
     actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    print(f"[CAM] Camera opened successfully via OpenCV: {actual_w}x{actual_h}")
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    codec = int(cap.get(cv2.CAP_PROP_FOURCC))
+    codec_str = "".join([chr((codec >> 8 * i) & 0xFF) for i in range(4)])
+    print(f"[CAM] Camera opened successfully via OpenCV: {actual_w}x{actual_h} @ {actual_fps}fps ({codec_str})")
 
     calibrator = BoardCalibrator()
     calibrator.load()
@@ -402,10 +423,18 @@ def run_vision_loop(half_frame=False):
     try:
         while True:
             # ── Frame acquisition ─────────────────────────────────────────────
-            ret, frame = cap.read()
-            if not ret or frame is None:
+            try:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    cv2.waitKey(1)
+                    continue
+            except cv2.error:
+                # Catch corrupted frames due to USB drops
                 cv2.waitKey(1)
                 continue
+
+            # Flip the frame 180 degrees because the camera is mounted upside down
+            frame = cv2.flip(frame, -1)
 
             # The ZED (and some other stereo webcams) outputs a side-by-side frame (Left + Right).
             # We crop the frame in half to just use the left camera feed if the --half flag is provided:
@@ -423,6 +452,34 @@ def run_vision_loop(half_frame=False):
 
             # ── Processing ───────────────────────────────────────────────────
             board_mask = create_board_mask(calibrator.corners_px, bgr.shape)
+
+            # Mask out the end-effector area to avoid self-segmentation of the arm/tool
+            eef_pos = vision_state.get_eef_pos()
+            if eef_pos is not None and calibrator.H is not None and board_mask is not None:
+                try:
+                    TL = ROBOT_CORNERS_BASE["TL"]
+                    TR = ROBOT_CORNERS_BASE["TR"]
+                    BL = ROBOT_CORNERS_BASE["BL"]
+                    
+                    vx = TR - TL
+                    vy = BL - TL
+                    v = eef_pos - TL
+                    x_frac = np.dot(v, vx) / np.dot(vx, vx)
+                    y_frac = np.dot(v, vy) / np.dot(vy, vy)
+                    
+                    # Project fractions back to camera frame using H_inv
+                    H_inv = np.linalg.inv(calibrator.H)
+                    pt = np.array([[[x_frac, y_frac]]], dtype=np.float32)
+                    pt_camera = cv2.perspectiveTransform(pt, H_inv)[0, 0]
+                    eef_cx, eef_cy = int(pt_camera[0]), int(pt_camera[1])
+                    
+                    # Ensure coordinates are within image bounds
+                    h, w = board_mask.shape[:2]
+                    if 0 <= eef_cx < w and 0 <= eef_cy < h:
+                        # Draw a black circle on board_mask to exclude the arm/tool (radius = 90px)
+                        cv2.circle(board_mask, (eef_cx, eef_cy), 90, 0, -1)
+                except Exception as e:
+                    pass
 
             mask_01 = segment_ink(
                 bgr,
@@ -481,6 +538,10 @@ def run_vision_loop(half_frame=False):
                     cv2.drawContours(vis, [ink_obs["largest_contour"]], -1, (0, 255, 0), 2)
                 cv2.circle(vis, (cx, cy), 12, (0, 255, 0), 2)
                 cv2.drawMarker(vis, (cx, cy), (0, 255, 0), cv2.MARKER_CROSS, 24, 2)
+
+            if eef_pos is not None and 'eef_cx' in locals() and 'eef_cy' in locals():
+                cv2.circle(vis, (eef_cx, eef_cy), 90, (255, 120, 0), 2)
+                cv2.putText(vis, "EEF MASK", (eef_cx - 40, eef_cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 120, 0), 1)
 
             if calibrator.active:
                 for (px, py) in calibrator.corners_px:
@@ -553,6 +614,7 @@ def run_vision_loop(half_frame=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Wipe Vision Module - OpenCV Generic")
     parser.add_argument("--half", action="store_true", help="Crop the camera frame in half (useful for stereo side-by-side feeds).")
+    parser.add_argument("--cam_index", type=int, default=2, help="OpenCV Camera Index. Default is 2.")
     args = parser.parse_args()
 
-    run_vision_loop(half_frame=args.half)
+    run_vision_loop(half_frame=args.half, cam_index=args.cam_index)
