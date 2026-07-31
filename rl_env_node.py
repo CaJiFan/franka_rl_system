@@ -15,6 +15,7 @@ import math
 from scipy.spatial.transform import Rotation as R
 from scipy.linalg import expm
 import os
+import sys
 
 try:
     from stable_baselines3 import SAC
@@ -60,16 +61,29 @@ class RLEnvNode(Node):
             BASE_PATH = "checkpoints"
             ALGO="SAC"
             ENV="WIPE_ICRA"
-            CONFIG="SPD"
+            CONFIG=sys.argv[1]
             self.model_path = os.path.join(BASE_PATH, f'{ALGO}_{ENV}_{CONFIG}' ,"best_model") # Update with your actual checkpoint path!
             self.get_logger().info(f"Loading SAC policy from {self.model_path} onto CPU...")
             try:
                 self.model = SAC.load(self.model_path, device='cpu')
                 self.get_logger().info("Model loaded successfully!")
+                
+                # Dynamically set prior_dim based on the model's observation space
+                obs_shape = self.model.observation_space.shape[0]
+                if obs_shape == 62:
+                    self.prior_dim = 6
+                    self.get_logger().info("Detected BASELINE diagonal model (62-D observations)")
+                elif obs_shape == 65:
+                    self.prior_dim = 9
+                    self.get_logger().info("Detected SPD manifold model (65-D observations)")
+                else:
+                    self.prior_dim = 9 # Fallback
+                    self.get_logger().warn(f"Unknown observation space shape {obs_shape}, defaulting prior_dim=9")
             except Exception as e:
                 self.get_logger().warn(f"Could not load model: {e}")
                 self.get_logger().warn("Using a dummy random policy for now.")
                 self.model = None
+                self.prior_dim = 9 # Default fallback
 
         # --- State Caches ---
         self.latest_joint_state = None
@@ -167,6 +181,12 @@ class RLEnvNode(Node):
         v_data = self.latest_wipe_state.data
         wipe_centroid = np.array(v_data[0:3], dtype=np.float32)
         proportion_wiped = np.array([v_data[4]], dtype=np.float32)
+        
+        # Safety check: If no ink is detected, the vision node publishes [0,0,0].
+        # We override this to the current eraser tip position to prevent the robot from diving to the base origin.
+        if np.all(wipe_centroid == 0.0):
+            wipe_centroid = eef_pos_eraser.copy()
+            
         gripper_to_wipe_centroid = wipe_centroid - eef_pos_eraser
 
         # Construct 55-D base observation list in exact insertion order matching Robosuite Wipe env
@@ -207,13 +227,13 @@ class RLEnvNode(Node):
         for key, value in zip(obs_list_names, obs_list):
             self.get_logger().info(f"{key}: {value}")
 
-        # Add LLM residual prior states (9 for prior, 1 for weight) -> 10-D (Total 65-D)
-        obs_list.append(np.zeros(9, dtype=np.float32))     # current_prior
-        obs_list.append(np.array([0.0], dtype=np.float32))  # current_w
-
-        # Flatten into the 65D vector
+        # Add LLM residual prior states (prior_dim for prior, 1 for weight) -> 7-D or 10-D (Total 62-D or 65-D)
+        obs_list.append(np.zeros(self.prior_dim, dtype=np.float32))     # current_prior
+        obs_list.append(np.array([0.0], dtype=np.float32))              # current_w
+ 
+        # Flatten into the 62D or 65D vector
         flat_obs = np.concatenate(obs_list).astype(np.float32)
-
+ 
         # 3. Predict the action
         if self.use_zmq:
             try:
@@ -227,7 +247,7 @@ class RLEnvNode(Node):
                     self.zmq_socket = self.context.socket(zmq.REQ)
                     self.zmq_socket.connect(f"tcp://{self.server_ip}:5555")
                     return
-
+ 
                 action_bytes = self.zmq_socket.recv()
                 action = np.frombuffer(action_bytes, dtype=np.float32)
             except zmq.ZMQError as e:
@@ -238,8 +258,8 @@ class RLEnvNode(Node):
                 # deterministic=True disables exploration noise during deployment
                 action, _states = self.model.predict(flat_obs, deterministic=True)
             else:
-                # Dummy random action if no model is loaded (15D for Riemannian Impedance)
-                action = np.random.uniform(-0.1, 0.1, size=(15,)).astype(np.float32)
+                # Dummy random action if no model is loaded (prior_dim + 6 size)
+                action = np.random.uniform(-0.1, 0.1, size=(self.prior_dim + 6,)).astype(np.float32)
 
         # 4. Publish the action to the robot
         self.publish_action(action)
@@ -251,40 +271,57 @@ class RLEnvNode(Node):
         for the custom C++ Riemannian Impedance Controller.
         """
         # 1. Parse and decode Action Space
-        mandel_params = action[:6]
-        kp_ori_raw = action[6:9]
-        pos_delta = action[9:12]
-        ori_delta_vec = action[12:15]
-
-        # 2. Riemannian Exp Map -> SPD Matrix (3x3)
         min_kp = 1.0
-        # max_kp = 3000
-        max_kp = 160
-        
-        # Diagonals linearly decoded to [min_kp, max_kp] and then log-mapped
-        target_physical = min_kp + 0.5 * (mandel_params[:3] + 1.0) * (max_kp - min_kp)
-        diag_log = np.log(target_physical)
-        
-        S = np.zeros((3, 3))
-        S[0, 0] = diag_log[0]
-        S[1, 1] = diag_log[1]
-        S[2, 2] = diag_log[2]
-        
-        # Off-diagonals scaled by 0.2 and Mandel basis mapping
-        inv_sqrt2 = 1.0 / math.sqrt(2.0)
-        S[0, 1] = S[1, 0] = (mandel_params[5] * 0.2) * inv_sqrt2
-        S[0, 2] = S[2, 0] = (mandel_params[4] * 0.2) * inv_sqrt2
-        S[1, 2] = S[2, 1] = (mandel_params[3] * 0.2) * inv_sqrt2
-        K_p = expm(S)
+        max_kp = 160.0 # Clean, safe stiffness limit
 
-        # 3. Eigen Decomposition for Damping Matrix (Kd = 2 * sqrt(Kp))
-        eigenvalues, eigenvectors = np.linalg.eigh(K_p)
-        eigenvalues = np.maximum(eigenvalues, 1.0) 
-        K_d = eigenvectors @ np.diag(2.0 * np.sqrt(eigenvalues)) @ eigenvectors.T
+        if self.prior_dim == 6:
+            # 12D Action space for Baseline (3 diagonal trans stiffness, 3 diagonal rot stiffness, 3 pos delta, 3 ori delta)
+            kp_trans_raw = action[:3]
+            kp_rot_raw = action[3:6]
+            pos_delta = action[6:9]
+            ori_delta_vec = action[9:12]
 
-        # 4. Rotational Stiffness & Damping (Linearly decoded)
-        kp_ori = min_kp + 0.5 * (kp_ori_raw + 1.0) * (max_kp - min_kp)
-        kd_ori = 2.0 * np.sqrt(kp_ori)
+            # Linear decode to physical values
+            kp_trans_scaled = min_kp + 0.5 * (kp_trans_raw + 1.0) * (max_kp - min_kp)
+            kp_rot_scaled = min_kp + 0.5 * (kp_rot_raw + 1.0) * (max_kp - min_kp)
+
+            # Build diagonal K_p and K_d matrices
+            K_p = np.diag(kp_trans_scaled)
+            K_d = np.diag(2.0 * np.sqrt(kp_trans_scaled))
+
+            kp_ori = kp_rot_scaled
+            kd_ori = 2.0 * np.sqrt(kp_rot_scaled)
+        else:
+            # 15D Action space for SPD Manifold
+            mandel_params = action[:6]
+            kp_ori_raw = action[6:9]
+            pos_delta = action[9:12]
+            ori_delta_vec = action[12:15]
+            
+            # Diagonals linearly decoded to [min_kp, max_kp] and then log-mapped
+            target_physical = min_kp + 0.5 * (mandel_params[:3] + 1.0) * (max_kp - min_kp)
+            diag_log = np.log(target_physical)
+            
+            S = np.zeros((3, 3))
+            S[0, 0] = diag_log[0]
+            S[1, 1] = diag_log[1]
+            S[2, 2] = diag_log[2]
+            
+            # Off-diagonals scaled by 0.2 and Mandel basis mapping
+            inv_sqrt2 = 1.0 / math.sqrt(2.0)
+            S[0, 1] = S[1, 0] = (mandel_params[5] * 0.2) * inv_sqrt2
+            S[0, 2] = S[2, 0] = (mandel_params[4] * 0.2) * inv_sqrt2
+            S[1, 2] = S[2, 1] = (mandel_params[3] * 0.2) * inv_sqrt2
+            K_p = expm(S)
+
+            # Eigen Decomposition for Damping Matrix (Kd = 2 * sqrt(Kp))
+            eigenvalues, eigenvectors = np.linalg.eigh(K_p)
+            eigenvalues = np.maximum(eigenvalues, 1.0) 
+            K_d = eigenvectors @ np.diag(2.0 * np.sqrt(eigenvalues)) @ eigenvectors.T
+
+            # Rotational Stiffness & Damping (Linearly decoded)
+            kp_ori = min_kp + 0.5 * (kp_ori_raw + 1.0) * (max_kp - min_kp)
+            kd_ori = 2.0 * np.sqrt(kp_ori)
 
         # 5. Position Integration & Safety Workspace
         # Cap max delta to 1cm per step (0.2 m/s at 20Hz)

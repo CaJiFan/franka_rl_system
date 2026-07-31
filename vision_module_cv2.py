@@ -57,12 +57,20 @@ BOARD_DIAGONAL_M = np.sqrt(BOARD_WIDTH_M**2 + BOARD_HEIGHT_M**2)
 # Robot Base Calibration (Physical 3D locations of the 4 board corners)
 # Measure these by jogging the robot EEF to the corners and reading (X, Y, Z)
 # ---------------------------------------------------------------------------
+# ROBOT_CORNERS_BASE = {
+#     "TL": np.array([0.5540, -0.1587, 0.1950]), # Top-Left
+#     "TR": np.array([0.5449, 0.1771, 0.1950]), # Top-Right
+#     "BR": np.array([0.7530, 0.1776, 0.0388]), # Bottom-Right
+#     "BL": np.array([0.7591, -0.1556, 0.0424]), # Bottom-Left
+# }
+
 ROBOT_CORNERS_BASE = {
-    "TL": np.array([0.5540, -0.1587, 0.1950]), # Top-Left
-    "TR": np.array([0.5449, 0.1771, 0.1950]), # Top-Right
-    "BR": np.array([0.7530, 0.1776, 0.0388]), # Bottom-Right
-    "BL": np.array([0.7591, -0.1556, 0.0424]), # Bottom-Left
+    "TL": np.array([0.5044, -0.1596, 0.0766]), # Top-Left
+    "TR": np.array([0.5345, 0.1744, 0.0701]), # Top-Right
+    "BR": np.array([0.7838, -0.1822, -0.0786]), # Bottom-Right
+    "BL": np.array([0.7934, 0.1682, -0.0854]), # Bottom-Left
 }
+
 
 # Control loop target
 CONTROL_HZ = 20.0
@@ -132,25 +140,28 @@ def segment_ink(bgr_img, board_mask, otsu_offset=0, min_area=50, max_area=5000, 
     L   = lab[:, :, 0].astype(np.float32)
     L   = cv2.GaussianBlur(L, (7, 7), 0)
 
-    # 2. Compute Otsu threshold using ONLY board pixels
-    board_pixels = L[board_mask > 0]
-    if len(board_pixels) == 0:
-        return np.zeros((h, w), dtype=np.uint8)
+    # 2. Adaptive Gaussian Thresholding to handle local illumination differences (shadows/glare)
+    L_uint8 = np.clip(L, 0, 255).astype(np.uint8)
+    
+    # C is the constant subtracted from the mean. Standard value is 10.
+    # The user can shift it dynamically using the trackbar (otsu_offset in [-50, 50]).
+    # We map C to: 10 + otsu_offset // 2 (safe range [1, 35])
+    C_val = max(1, 10 + int(otsu_offset // 2))
+    
+    # Block size must be odd and larger than standard stroke widths (e.g., 65 pixels)
+    ink_raw = cv2.adaptiveThreshold(
+        L_uint8, 
+        255, 
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY_INV, 
+        65, 
+        C_val
+    )
 
-    board_uint8 = board_pixels.astype(np.uint8).reshape(-1, 1)
-    otsu_val, _ = cv2.threshold(board_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Apply offset
-    thresh = float(otsu_val) - float(otsu_offset)
-    thresh = np.clip(thresh, 1, 254)
-
-    # 3. Threshold: pixels DARKER than thresh -> ink
-    ink_raw = (L < thresh).astype(np.uint8) * 255
-
-    # 4. Apply board mask
+    # 3. Apply board mask (excludes arm, tool, and background outside the board)
     ink_raw = cv2.bitwise_and(ink_raw, ink_raw, mask=board_mask)
 
-    # 5. Morphological cleanup (Close to fill holes, Open to remove specks)
+    # 4. Morphological cleanup (Close to fill holes, Open to remove specks)
     close_sz = max(1, close_rad * 2 + 1)
     k_open   = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     k_close  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_sz, close_sz))
@@ -158,7 +169,7 @@ def segment_ink(bgr_img, board_mask, otsu_offset=0, min_area=50, max_area=5000, 
     ink_raw = cv2.morphologyEx(ink_raw, cv2.MORPH_CLOSE, k_close)
     ink_raw = cv2.morphologyEx(ink_raw, cv2.MORPH_OPEN,  k_open)
 
-    # 6. Filter small and oversized blobs
+    # 5. Filter small and oversized blobs
     cnts, _ = cv2.findContours(ink_raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     clean   = np.zeros((h, w), dtype=np.uint8)
     for c in cnts:
@@ -344,24 +355,28 @@ class VisionState:
         self._lock    = threading.Lock()
         self._obs_vec = np.zeros(8, dtype=np.float32)
         self._eef_pos = None
-
-    def set_eef_pos(self, pos):
+        self._eef_quat = None
+ 
+    def set_eef_pose(self, pos, quat):
         with self._lock:
             self._eef_pos = np.asarray(pos, dtype=np.float32).copy()
-
+            self._eef_quat = np.asarray(quat, dtype=np.float32).copy()
+ 
     def update(self, obs_vec):
         with self._lock:
             self._obs_vec = obs_vec.copy()
-
+ 
     def get_obs(self):
         with self._lock:
             return self._obs_vec.copy()
-
-    def get_eef_pos(self):
+ 
+    def get_eef_pose(self):
         with self._lock:
-            return self._eef_pos.copy() if self._eef_pos is not None else None
-
-
+            if self._eef_pos is None or self._eef_quat is None:
+                return None, None
+            return self._eef_pos.copy(), self._eef_quat.copy()
+ 
+ 
 vision_state = VisionState()
 
 
@@ -410,6 +425,8 @@ def run_vision_loop(half_frame=False, cam_index=0):
 
     task_start_area_px = 0.0
     task_started       = False
+    task_start_centroid = None
+    task_start_centroid_px = None
     locked_target_px   = None
 
     print("\n[VIS] Controls:")
@@ -453,31 +470,58 @@ def run_vision_loop(half_frame=False, cam_index=0):
             # ── Processing ───────────────────────────────────────────────────
             board_mask = create_board_mask(calibrator.corners_px, bgr.shape)
 
-            # Mask out the end-effector area to avoid self-segmentation of the arm/tool
-            eef_pos = vision_state.get_eef_pos()
-            if eef_pos is not None and calibrator.H is not None and board_mask is not None:
+            # Mask out the end-effector area and the eraser tool to avoid self-segmentation
+            eef_pos, eef_quat = vision_state.get_eef_pose()
+            if eef_pos is not None and eef_quat is not None and calibrator.H is not None and board_mask is not None:
                 try:
+                    from scipy.spatial.transform import Rotation as R
                     TL = ROBOT_CORNERS_BASE["TL"]
                     TR = ROBOT_CORNERS_BASE["TR"]
                     BL = ROBOT_CORNERS_BASE["BL"]
                     
                     vx = TR - TL
                     vy = BL - TL
+                    
+                    # Compute eraser position
+                    r_curr = R.from_quat(eef_quat)
+                    tcp_offset = np.array([0.0, 0.0, 0.185])
+                    eef_pos_eraser = eef_pos + r_curr.apply(tcp_offset)
+                    
+                    # 1. Project Flange center
                     v = eef_pos - TL
                     x_frac = np.dot(v, vx) / np.dot(vx, vx)
                     y_frac = np.dot(v, vy) / np.dot(vy, vy)
                     
-                    # Project fractions back to camera frame using H_inv
                     H_inv = np.linalg.inv(calibrator.H)
                     pt = np.array([[[x_frac, y_frac]]], dtype=np.float32)
                     pt_camera = cv2.perspectiveTransform(pt, H_inv)[0, 0]
                     eef_cx, eef_cy = int(pt_camera[0]), int(pt_camera[1])
                     
+                    # 2. Project Eraser center
+                    v_eraser = eef_pos_eraser - TL
+                    x_frac_eraser = np.dot(v_eraser, vx) / np.dot(vx, vx)
+                    y_frac_eraser = np.dot(v_eraser, vy) / np.dot(vy, vy)
+                    pt_eraser = np.array([[[x_frac_eraser, y_frac_eraser]]], dtype=np.float32)
+                    pt_camera_eraser = cv2.perspectiveTransform(pt_eraser, H_inv)[0, 0]
+                    eraser_cx, eraser_cy = int(pt_camera_eraser[0]), int(pt_camera_eraser[1])
+                    
                     # Ensure coordinates are within image bounds
                     h, w = board_mask.shape[:2]
+                    
+                    # Mask flange (45px radius)
                     if 0 <= eef_cx < w and 0 <= eef_cy < h:
-                        # Draw a black circle on board_mask to exclude the arm/tool (radius = 90px)
-                        cv2.circle(board_mask, (eef_cx, eef_cy), 90, 0, -1)
+                        cv2.circle(board_mask, (eef_cx, eef_cy), 45, 0, -1)
+                        
+                        # Draw a thick black line to cover the camera cable running to the TL corner (thickness = 80px)
+                        if len(calibrator.corners_px) > 0:
+                            TL_px = calibrator.corners_px[0]
+                            cv2.line(board_mask, (eef_cx, eef_cy), (int(TL_px[0]), int(TL_px[1])), 0, 80)
+                            
+                    # Mask physical eraser tool assembly (90px radius around the eraser tip)
+                    # ONLY apply this mask when the eraser is close to the board (Z < 0.22) to avoid parallax errors when high up!
+                    if eef_pos_eraser[2] < 0.22:
+                        if 0 <= eraser_cx < w and 0 <= eraser_cy < h:
+                            cv2.circle(board_mask, (eraser_cx, eraser_cy), 90, 0, -1)
                 except Exception as e:
                     pass
 
@@ -499,7 +543,12 @@ def run_vision_loop(half_frame=False, cam_index=0):
             )
             locked_target_px = ink_obs["centroid_px"]
 
-            eef_pos = vision_state.get_eef_pos()
+            # Lock the centroid to the start of the task if requested (trial duration lock)
+            if task_started and task_start_centroid is not None:
+                ink_obs["wipe_centroid"] = task_start_centroid.copy()
+                ink_obs["centroid_px"] = task_start_centroid_px
+
+            eef_pos, _ = vision_state.get_eef_pose()
             obs_vec = build_obs_vector(ink_obs, eef_pos)
             vision_state.update(obs_vec)
 
@@ -540,8 +589,22 @@ def run_vision_loop(half_frame=False, cam_index=0):
                 cv2.drawMarker(vis, (cx, cy), (0, 255, 0), cv2.MARKER_CROSS, 24, 2)
 
             if eef_pos is not None and 'eef_cx' in locals() and 'eef_cy' in locals():
-                cv2.circle(vis, (eef_cx, eef_cy), 90, (255, 120, 0), 2)
-                cv2.putText(vis, "EEF MASK", (eef_cx - 40, eef_cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 120, 0), 1)
+                # Draw the EEF circular mask
+                cv2.circle(vis, (eef_cx, eef_cy), 45, (255, 120, 0), 2)
+                cv2.putText(vis, "EEF MASK", (eef_cx - 20, eef_cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 120, 0), 1)
+                
+                # Draw the physical eraser mask if active (Z < 0.22)
+                if 'eraser_cx' in locals() and 'eraser_cy' in locals() and 'eef_pos_eraser' in locals():
+                    if eef_pos_eraser[2] < 0.22:
+                        cv2.circle(vis, (eraser_cx, eraser_cy), 90, (255, 120, 0), 2)
+                        cv2.putText(vis, "ERASER MASK", (eraser_cx - 35, eraser_cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 120, 0), 1)
+                
+                # Draw the cable line mask visual (semi-transparent line using alpha overlay)
+                if len(calibrator.corners_px) > 0:
+                    TL_px = calibrator.corners_px[0]
+                    overlay = vis.copy()
+                    cv2.line(overlay, (eef_cx, eef_cy), (int(TL_px[0]), int(TL_px[1])), (255, 120, 0), 80)
+                    cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
 
             if calibrator.active:
                 for (px, py) in calibrator.corners_px:
@@ -596,8 +659,10 @@ def run_vision_loop(half_frame=False, cam_index=0):
                 calibrator.start_calibration()
             elif key == ord('t'):
                 task_start_area_px = ink_obs["ink_area_px"]
+                task_start_centroid = ink_obs["wipe_centroid"].copy() if ink_obs["wipe_centroid"] is not None else None
+                task_start_centroid_px = ink_obs["centroid_px"]
                 task_started       = True
-                print(f"\n[VIS] TASK STARTED. Initial dirt area: {task_start_area_px:.0f} px")
+                print(f"\n[VIS] TASK STARTED. Initial dirt area: {task_start_area_px:.0f} px, locked centroid: {task_start_centroid}")
             elif key == ord('s'):
                 calibrator.save()
             elif key == ord('l'):

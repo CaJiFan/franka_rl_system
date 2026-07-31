@@ -46,7 +46,11 @@ class WipeVisionNode(Node):
 
     def eef_callback(self, msg):
         pos = msg.pose.position
-        vision_module_cv2.vision_state.set_eef_pos([pos.x, pos.y, pos.z])
+        quat = msg.pose.orientation
+        vision_module_cv2.vision_state.set_eef_pose(
+            [pos.x, pos.y, pos.z],
+            [quat.x, quat.y, quat.z, quat.w]
+        )
 
     def timer_callback(self):
         # Retrieve the latest observation from the vision module's thread-safe state
