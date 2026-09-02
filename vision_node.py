@@ -4,19 +4,122 @@ vision_node.py
 --------------
 ROS2 Node that wraps the OpenCV vision module.
 Runs the UI on a background thread and publishes the detected wipe state.
+
+Topics published:
+  /wipe_markers  (Float32MultiArray, 20 floats)
+      5 markers × [x, y, z, wiped] in ascending robot-Y order.
+      Undetected / not-yet-initialized slots: [0, 0, 0, 1.0] (treated as wiped).
+
+  /wipe_state  (Float32MultiArray, 8 floats) — backward-compat legacy topic.
+      [cent_x, cent_y, cent_z, radius, proportion_wiped, 0, 0, 0]
+      cent = active marker centroid (first non-wiped marker), or zeros if none.
 """
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import PoseStamped
+import numpy as np
 import threading
 import sys
 
-# Import your existing generic CV2 module
+# Import the generic CV2 vision module
 import vision_module_cv2
 
+
 class WipeVisionNode(Node):
+    def __init__(self):
+        super().__init__('wipe_vision_node')
+
+        # ── Publishers ───────────────────────────────────────────────────────
+        # Primary: per-marker topic (20 floats: 5 × [x, y, z, wiped])
+        self.pub_markers = self.create_publisher(
+            Float32MultiArray, '/wipe_markers', 10
+        )
+        # Legacy: single active-centroid topic (8 floats) for backward compat
+        self.pub_legacy = self.create_publisher(
+            Float32MultiArray, '/wipe_state', 10
+        )
+
+        # ── Subscriber: EEF pose for self-masking ────────────────────────────
+        self.sub_eef = self.create_subscription(
+            PoseStamped,
+            '/franka_robot_state_broadcaster/current_pose',
+            self.eef_callback,
+            10
+        )
+
+        # ── 20 Hz publish timer ──────────────────────────────────────────────
+        self.timer = self.create_timer(
+            1.0 / vision_module_cv2.CONTROL_HZ, self.timer_callback
+        )
+
+        # ── Vision thread ────────────────────────────────────────────────────
+        cam_index = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+        self.vision_thread = threading.Thread(
+            target=vision_module_cv2.run_vision_loop,
+            kwargs={'cam_index': cam_index},
+            daemon=True
+        )
+        self.vision_thread.start()
+
+        self.get_logger().info(f"Wipe Vision Node started on camera {cam_index}.")
+
+    # ── Callbacks ──────────────────────────────────────────────────────────
+
+    def eef_callback(self, msg):
+        pos  = msg.pose.position
+        quat = msg.pose.orientation
+        vision_module_cv2.vision_state.set_eef_pose(
+            [pos.x, pos.y, pos.z],
+            [quat.x, quat.y, quat.z, quat.w]
+        )
+
+    def timer_callback(self):
+        # ── Publish /wipe_markers (20 floats: 5 × [x, y, z, wiped]) ─────────
+        states = vision_module_cv2.vision_state.get_marker_states()
+        marker_data = []
+        active_centroid = np.zeros(3, dtype=np.float32)
+        found_active = False
+        for s in states:
+            c = s["centroid_3d"]
+            w = float(s["wiped"])
+            marker_data.extend([float(c[0]), float(c[1]), float(c[2]), w])
+            if not found_active and w < 0.5:
+                active_centroid = c.copy()
+                found_active = True
+
+        markers_msg = Float32MultiArray()
+        markers_msg.data = marker_data
+        self.pub_markers.publish(markers_msg)
+
+        # ── Publish /wipe_state (legacy 8-float format) ───────────────────────
+        legacy_msg = Float32MultiArray()
+        legacy_msg.data = [
+            float(active_centroid[0]),
+            float(active_centroid[1]),
+            float(active_centroid[2]),
+            0.1122,           # wipe_radius constant
+            0.0,              # proportion_wiped (computed in rl_env_node)
+            0.0, 0.0, 0.0,   # eef-to-centroid (computed in rl_env_node)
+        ]
+        self.pub_legacy.publish(legacy_msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = WipeVisionNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+
     def __init__(self):
         super().__init__('wipe_vision_node')
         

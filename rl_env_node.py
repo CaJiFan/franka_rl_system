@@ -26,17 +26,25 @@ from std_msgs.msg import Float32MultiArray, Float64MultiArray
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped, WrenchStamped, TwistStamped
 
-# Define the exact order of keys your RL agent expects.
-# You can easily re-order this array to match Robosuite!
-OBS_KEYS = [
-    "joint_pos",                # 7D
-    "joint_vel",                # 7D
-    "eef_pos",                  # 3D
-    "eef_quat",                 # 4D
-    "proportion_wiped",         # 1D
-    "gripper_to_wipe_centroid", # 3D
-    "robot0_contact",           # 1D
-]
+# GRIP_SITE_OFFSET: static 90-degree rotation from Franka flange to the virtual wiper site.
+# This matches what Robosuite computes internally for 'robot0_eef_quat' (the grip-site frame).
+# Format: [x, y, z, w] (SciPy convention)
+GRIP_SITE_OFFSET = np.array([0.7018, -0.0067, 0.0865, 0.7071], dtype=np.float32)
+
+# Obs-space key documentation (85-D layout)
+# Slots 0-46:  Robot Proprioception
+#   0- 6:  joint_pos (7)
+#   7-13:  cos(joint_pos) (7)
+#  14-20:  sin(joint_pos) (7)
+#  21-27:  joint_vel (7)
+#  28-34:  joint_acc (7, numerically estimated)
+#  35-37:  eef_pos (3)
+#  38-41:  eef_quat  -- flange (4)
+#  42-45:  eef_quat_site -- grip-site with static offset (4)
+#  46:     robot0_contact (1, |Fz| > 2 N)
+# Slots 47-81: Per-marker state (5 × 7 = 35)
+#   Each marker:  marker_pos (3) + marker_wiped (1) + gripper_to_marker (3)
+# Slots 82-84: gripper_to_active_waypoint (3)
 
 class RLEnvNode(Node):
     def __init__(self):
@@ -46,7 +54,22 @@ class RLEnvNode(Node):
         # Set to True to send observations to a remote ZMQ server.
         # Set to False to load the model and run inference locally on this machine.
         self.use_zmq = False 
-        self.tcp_offset = np.array([0.0, 0.0, 0.185])
+        # TCP offset: flange center -> wiping contact surface (bottom face of tool)
+        # Tool: 12x5x3 cm printed wiping pad  ->  contact at Z = 0.030 m from flange
+        # Keep in sync with tcp_offset in record_corners.py !
+        self.tcp_offset = np.array([0.0, 0.0, 0.030])
+
+        # ── Deployment Test Flags ────────────────────────────────────────────────────
+        # Set True to ignore policy stiffness and use a fixed Kp=150 N/m diagonal
+        # (critical damping applied automatically). Useful for isolating whether
+        # position tracking is correct before trusting the learned stiffness.
+        self.POSITION_ONLY_MODE = True
+        self.FIXED_KP  = 150.0   # N/m  (translational)
+        self.FIXED_KP_ORI = 50.0 # N·m/rad (rotational, ~10% of translational)
+
+        # Fix A: Hold current orientation and ignore policy orientation commands to eliminate wrist spin
+        self.POSITION_ONLY_ORI = True
+
 
         if self.use_zmq:
             # --- ZMQ Client Setup ---
@@ -70,15 +93,22 @@ class RLEnvNode(Node):
                 
                 # Dynamically set prior_dim based on the model's observation space
                 obs_shape = self.model.observation_space.shape[0]
-                if obs_shape == 62:
+                if obs_shape == 85:
+                    self.obs_mode = "MULTI_MARKER_85D"
+                    self.prior_dim = 6  # action still has prior_dim stiffness params
+                    self.get_logger().info("Detected MULTI-MARKER model (85-D observations)")
+                elif obs_shape == 62:
+                    self.obs_mode = "BASELINE_62D"
                     self.prior_dim = 6
                     self.get_logger().info("Detected BASELINE diagonal model (62-D observations)")
                 elif obs_shape == 65:
+                    self.obs_mode = "SPD_65D"
                     self.prior_dim = 9
                     self.get_logger().info("Detected SPD manifold model (65-D observations)")
                 else:
-                    self.prior_dim = 9 # Fallback
-                    self.get_logger().warn(f"Unknown observation space shape {obs_shape}, defaulting prior_dim=9")
+                    self.obs_mode = "UNKNOWN"
+                    self.prior_dim = 6
+                    self.get_logger().warn(f"Unknown observation space shape {obs_shape}, defaulting prior_dim=6")
             except Exception as e:
                 self.get_logger().warn(f"Could not load model: {e}")
                 self.get_logger().warn("Using a dummy random policy for now.")
@@ -86,24 +116,38 @@ class RLEnvNode(Node):
                 self.prior_dim = 9 # Default fallback
 
         # --- State Caches ---
-        self.latest_joint_state = None
-        self.latest_eef_pose = None
-        self.latest_wrench = None
-        self.latest_wipe_state = None
+        self.latest_joint_state  = None
+        self.latest_eef_pose     = None
+        self.latest_wrench       = None
+        self.latest_wipe_markers = None  # 20-float /wipe_markers msg
 
-        # Velocity tracking variables
-        self.prev_eef_pos = None
-        self.prev_eef_quat = None
+        # Velocity / acceleration tracking
+        self.prev_eef_pos    = None
+        self.prev_eef_quat   = None
+        self.prev_joint_vel  = None   # for joint_acc estimation
         self.last_update_time = None
 
+        # ── EMA smoothing state (Fix 1 & Fix B: damp high-freq policy oscillations) ──
+        # Lower alpha = heavier smoothing, Higher alpha = more responsive
+        self.ALPHA_POS  = 0.40   # position target (Fix B: increased from 0.15 to allow faster position tracking)
+        self.ALPHA_ORI  = 0.20   # orientation target (SLERP-like approximation)
+        self.ALPHA_STIF = 0.10   # stiffness matrices (slowest — avoids torque spikes)
+        self.ema_pos    = None   # np.ndarray(3,)  — initialised on first action
+        self.ema_quat   = None   # np.ndarray(4,)  — [x,y,z,w]
+        self.ema_Kp     = None   # np.ndarray(3,3)
+        self.ema_Kd     = None   # np.ndarray(3,3)
+        self.ema_kp_ori = None   # np.ndarray(3,)
+        self.ema_kd_ori = None   # np.ndarray(3,)
+
+        # Integrated position target (accumulates delta to overcome static joint friction)
+        self.target_pos = None
+
         # --- Subscribers ---
-        # Subscribe to standard ROS2 topics (adjust topic names based on your Franka setup)
-        self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
-        self.create_subscription(PoseStamped, '/franka_robot_state_broadcaster/current_pose', self.eef_pose_cb, 10)
-        self.create_subscription(WrenchStamped, '/franka_robot_state_broadcaster/external_wrench_in_base_frame', self.wrench_cb, 10)
-        
-        # Subscribe to our custom Vision Node
-        self.create_subscription(Float32MultiArray, '/wipe_state', self.vision_cb, 10)
+        self.create_subscription(JointState,     '/joint_states',                                                        self.joint_cb,   10)
+        self.create_subscription(PoseStamped,    '/franka_robot_state_broadcaster/current_pose',                         self.eef_pose_cb, 10)
+        self.create_subscription(WrenchStamped,  '/franka_robot_state_broadcaster/external_wrench_in_base_frame',        self.wrench_cb,  10)
+        # Primary vision topic: 20 floats (5 markers × [x,y,z,wiped])
+        self.create_subscription(Float32MultiArray, '/wipe_markers', self.markers_cb, 10)
 
         # --- Publishers ---
         self.cmd_pub = self.create_publisher(Float64MultiArray, '/riemannian_impedance_controller/impedance_cmd', 10)
@@ -112,28 +156,19 @@ class RLEnvNode(Node):
         self.control_rate = 20.0
         self.timer = self.create_timer(1.0 / self.control_rate, self.control_loop)
 
-    # -- Callbacks to update caches --
-    def joint_cb(self, msg):
-        self.latest_joint_state = msg
-
-    def eef_pose_cb(self, msg):
-        self.latest_eef_pose = msg
-
-    def wrench_cb(self, msg):
-        self.latest_wrench = msg
-
-    def vision_cb(self, msg):
-        self.latest_wipe_state = msg
+    def joint_cb(self, msg):     self.latest_joint_state = msg
+    def eef_pose_cb(self, msg):  self.latest_eef_pose = msg
+    def wrench_cb(self, msg):    self.latest_wrench = msg
+    def markers_cb(self, msg):   self.latest_wipe_markers = msg
 
     # -- Main Loop --
     def control_loop(self):
-        # Ensure we have received at least one message from all sensors
-        if not (self.latest_joint_state and self.latest_eef_pose and 
-                self.latest_wrench and self.latest_wipe_state):
+        if not (self.latest_joint_state and self.latest_eef_pose and
+                self.latest_wrench and self.latest_wipe_markers):
             self.get_logger().warn("Waiting for all sensor topics...", throttle_duration_sec=2.0)
             return
 
-        # Compute delta time for velocity estimation
+        # Delta time
         now_time = self.get_clock().now()
         dt = 0.05
         if self.last_update_time is not None:
@@ -142,97 +177,110 @@ class RLEnvNode(Node):
                 dt = 0.05
         self.last_update_time = now_time
 
-        # Extract values
+        # ── Joint kinematics ─────────────────────────────────────────────────
         joint_pos = np.array(self.latest_joint_state.position[:7], dtype=np.float32)
         joint_vel = np.array(self.latest_joint_state.velocity[:7], dtype=np.float32)
 
-        pos = self.latest_eef_pose.pose.position
+        # joint_acc: numerically estimated backward derivative
+        if self.prev_joint_vel is not None:
+            joint_acc = (joint_vel - self.prev_joint_vel) / dt
+        else:
+            joint_acc = np.zeros(7, dtype=np.float32)
+        self.prev_joint_vel = joint_vel.copy()
+
+        # ── EEF pose ─────────────────────────────────────────────────────────
+        pos  = self.latest_eef_pose.pose.position
         quat = self.latest_eef_pose.pose.orientation
-        eef_pos = np.array([pos.x, pos.y, pos.z], dtype=np.float32)
+        eef_pos  = np.array([pos.x, pos.y, pos.z], dtype=np.float32)
         eef_quat = np.array([quat.x, quat.y, quat.z, quat.w], dtype=np.float32)
 
-        # Compute position of the eraser tip
-        r_curr = R.from_quat(eef_quat)
-        eef_pos_eraser = eef_pos + r_curr.apply(self.tcp_offset)
+        # Grip-site quaternion: static 90-degree offset from flange
+        r_eef  = R.from_quat(eef_quat)
+        r_site = R.from_quat(GRIP_SITE_OFFSET)
+        eef_quat_site = (r_eef * r_site).as_quat().astype(np.float32)  # [x,y,z,w]
 
-        # Estimate EEF velocities of the eraser tip
-        if self.prev_eef_pos is not None:
-            eef_vel_lin = (eef_pos_eraser - self.prev_eef_pos) / dt
-            r_prev = R.from_quat(self.prev_eef_quat)
-            r_diff = r_prev.inv() * r_curr
-            eef_vel_ang = r_diff.as_rotvec() / dt
-        else:
-            eef_vel_lin = np.zeros(3, dtype=np.float32)
-            eef_vel_ang = np.zeros(3, dtype=np.float32)
-        
-        self.prev_eef_pos = eef_pos_eraser.copy()
-        self.prev_eef_quat = eef_quat.copy()
+        # TCP (eraser tip) position
+        eef_pos_eraser = eef_pos + r_eef.apply(self.tcp_offset)
 
-        # Contact and force torque
-        force = self.latest_wrench.wrench.force
+        # ── Contact & F/T ────────────────────────────────────────────────────
+        force  = self.latest_wrench.wrench.force
         torque = self.latest_wrench.wrench.torque
-        robot0_contact_force = np.array([force.x, force.y, force.z], dtype=np.float32)
-        robot0_contact_torque = np.array([torque.x, torque.y, torque.z], dtype=np.float32)
-        
-        # 5 Newtons contact threshold
-        robot0_contact = np.array([1.0 if np.linalg.norm(robot0_contact_force) > 5.0 else 0.0], dtype=np.float32)
+        robot0_contact_force  = np.array([force.x,  force.y,  force.z],  dtype=np.float32)
 
-        # Vision State
-        v_data = self.latest_wipe_state.data
-        wipe_centroid = np.array(v_data[0:3], dtype=np.float32)
-        proportion_wiped = np.array([v_data[4]], dtype=np.float32)
-        
-        # Safety check: If no ink is detected, the vision node publishes [0,0,0].
-        # We override this to the current eraser tip position to prevent the robot from diving to the base origin.
-        if np.all(wipe_centroid == 0.0):
-            wipe_centroid = eef_pos_eraser.copy()
-            
-        gripper_to_wipe_centroid = wipe_centroid - eef_pos_eraser
+        # Contact: threshold on Z-axis normal force (|Fz| > 2 N), matching sim
+        robot0_contact = np.array(
+            [1.0 if abs(robot0_contact_force[2]) > 2.0 else 0.0], dtype=np.float32
+        )
 
-        # Construct 55-D base observation list in exact insertion order matching Robosuite Wipe env
+        # ── Vision: marker states from /wipe_markers (20 floats) ─────────────
+        v_data = list(self.latest_wipe_markers.data)  # 20 floats
+        marker_pos   = [np.array(v_data[i*4 : i*4+3], dtype=np.float32) for i in range(5)]
+        marker_wiped = [np.array([v_data[i*4+3]],      dtype=np.float32) for i in range(5)]
+
+        # gripper-to-marker vectors
+        gripper_to_marker = [mp - eef_pos_eraser for mp in marker_pos]
+
+        # active waypoint: first non-wiped marker
+        active_idx = next((i for i, w in enumerate(marker_wiped) if w[0] < 0.5), 4)
+        gripper_to_active_waypoint = gripper_to_marker[active_idx].copy()
+
+        # ── Assemble 85-D observation (STRICT KEY ORDER) ──────────────────────
+        # Proprioception (47-D)
         obs_list = [
-            np.cos(joint_pos),                  # 7
-            np.sin(joint_pos),                  # 7
-            joint_pos,                          # 7
-            joint_vel,                          # 7
-            eef_pos_eraser,                     # 3 (TCP position, not flange!)
-            eef_quat,                           # 4
-            eef_vel_lin,                        # 3
-            eef_vel_ang,                        # 3
-            robot0_contact,                     # 1
-            robot0_contact_force,               # 3
-            robot0_contact_torque,              # 3
-            wipe_centroid,                      # 3
-            proportion_wiped,                   # 1
-            gripper_to_wipe_centroid            # 3
+            joint_pos,              # 7  — raw joint angles
+            np.cos(joint_pos),      # 7  — cosine
+            np.sin(joint_pos),      # 7  — sine
+            joint_vel,              # 7  — joint velocities
+            joint_acc,              # 7  — joint accelerations (estimated)
+            eef_pos_eraser,         # 3  — TCP position
+            eef_quat,               # 4  — flange orientation
+            eef_quat_site,          # 4  — grip-site orientation (static offset)
+            robot0_contact,         # 1  — contact flag (|Fz| > 2 N)
         ]
+        # Per-marker state (5 × 7 = 35-D)
+        for i in range(5):
+            obs_list += [
+                marker_pos[i],          # 3 — absolute 3-D position
+                marker_wiped[i],        # 1 — wiped flag
+                gripper_to_marker[i],   # 3 — relative vector from TCP
+            ]
+        # Active waypoint vector (3-D)
+        obs_list.append(gripper_to_active_waypoint)
 
-        obs_list_names = [
-            "cos(joint_pos)",                     # 7
-            "sin(joint_pos)",                     # 7
-            "joint_pos",                          # 7
-            "joint_vel",                          # 7
-            "eef_pos",                            # 3
-            "eef_quat",                           # 4
-            "eef_vel_lin",                        # 3
-            "eef_vel_ang",                        # 3
-            "robot0_contact",                     # 1
-            "robot0_contact_force",               # 3
-            "robot0_contact_torque",              # 3
-            "wipe_centroid",                      # 3
-            "proportion_wiped",                   # 1
-            "gripper_to_wipe_centroid"            # 3
-        ]
-
-        for key, value in zip(obs_list_names, obs_list):
-            self.get_logger().info(f"{key}: {value}")
-
-        # Add LLM residual prior states (prior_dim for prior, 1 for weight) -> 7-D or 10-D (Total 62-D or 65-D)
-        obs_list.append(np.zeros(self.prior_dim, dtype=np.float32))     # current_prior
-        obs_list.append(np.array([0.0], dtype=np.float32))              # current_w
- 
-        # Flatten into the 62D or 65D vector
         flat_obs = np.concatenate(obs_list).astype(np.float32)
+
+        # ── Full Observation Diagnostics (throttled) ─────────────────────────
+        # Prints every key-value pair in the 85-D obs vector so you can
+        # compare directly with Robosuite's observation dict in simulation.
+        def _fmt(arr, fmt="+.4f"):
+            return "[" + "  ".join(f"{v:{fmt}}" for v in arr) + "]"
+
+        m_lines = ""
+        for i in range(5):
+            wiped_str = "WIPED" if marker_wiped[i][0] > 0.5 else "active" if i == active_idx else "pending"
+            m_lines += (
+                f"\n    M{i} ({wiped_str:7s})  pos={_fmt(marker_pos[i])}  "
+                f"g2m={_fmt(gripper_to_marker[i])}"
+            )
+
+        self.get_logger().info(
+            f"\n{'='*64} OBS SNAPSHOT {'='*64}\n"
+            f"  [00:06]  joint_pos      = {_fmt(joint_pos)}\n"
+            f"  [07:13]  cos(jnt_pos)   = {_fmt(np.cos(joint_pos))}\n"
+            f"  [14:20]  sin(jnt_pos)   = {_fmt(np.sin(joint_pos))}\n"
+            f"  [21:27]  joint_vel      = {_fmt(joint_vel)}\n"
+            f"  [28:34]  joint_acc      = {_fmt(joint_acc)}\n"
+            f"  [35:37]  eef_pos(TCP)   = {_fmt(eef_pos_eraser)}  (eraser tip)\n"
+            f"  [38:41]  eef_quat       = {_fmt(eef_quat)}  (flange xyzw)\n"
+            f"  [42:45]  eef_quat_site  = {_fmt(eef_quat_site)}  (grip-site xyzw)\n"
+            f"  [46]     contact        = {robot0_contact[0]:.0f}  (|Fz|>2N)\n"
+            f"  [47:81]  markers (active={active_idx}):{m_lines}\n"
+            f"  [82:84]  g2active_wp    = {_fmt(gripper_to_active_waypoint)}\n"
+            f"  obs_dim  = {flat_obs.shape[0]}\n"
+            f"{'='*141}",
+            throttle_duration_sec=0.5
+        )
+
  
         # 3. Predict the action
         if self.use_zmq:
@@ -258,7 +306,7 @@ class RLEnvNode(Node):
                 # deterministic=True disables exploration noise during deployment
                 action, _states = self.model.predict(flat_obs, deterministic=True)
             else:
-                # Dummy random action if no model is loaded (prior_dim + 6 size)
+                # Dummy random action: prior_dim stiffness + 6 kinematics (always 12-D for baseline)
                 action = np.random.uniform(-0.1, 0.1, size=(self.prior_dim + 6,)).astype(np.float32)
 
         # 4. Publish the action to the robot
@@ -323,37 +371,88 @@ class RLEnvNode(Node):
             kp_ori = min_kp + 0.5 * (kp_ori_raw + 1.0) * (max_kp - min_kp)
             kd_ori = 2.0 * np.sqrt(kp_ori)
 
-        # 5. Position Integration & Safety Workspace
+        # ── Position-Only Override ───────────────────────────────────────────────
+        # When POSITION_ONLY_MODE is True, replace whatever the policy output
+        # with a fixed isotropic impedance. Only pos/ori deltas are used.
+        if self.POSITION_ONLY_MODE:
+            kp_fixed = self.FIXED_KP
+            kd_fixed = 2.0 * np.sqrt(kp_fixed)       # critical damping
+            K_p = np.eye(3) * kp_fixed
+            K_d = np.eye(3) * kd_fixed
+            kp_ori = np.full(3, self.FIXED_KP_ORI)
+            kd_ori = 2.0 * np.sqrt(kp_ori)
+
+        # 5. Position Integration & Safety Workspace (Integrated target with 4cm safety tether)
         # Cap max delta to 1cm per step (0.2 m/s at 20Hz)
         pos_delta_safe = np.clip(pos_delta, -0.01, 0.01) 
         current_pos = self.latest_eef_pose.pose.position
-        new_pos = np.array([current_pos.x, current_pos.y, current_pos.z]) + pos_delta_safe
+        current_pos_arr = np.array([current_pos.x, current_pos.y, current_pos.z])
+
+        if self.target_pos is None:
+            self.target_pos = current_pos_arr.copy() + pos_delta_safe
+        else:
+            self.target_pos += pos_delta_safe
+
+        # Safety tether: clamp target error to max 4 cm from live robot position
+        # (Allows force to scale up to 6 N at Kp=150 N/m to break joint stiction, but prevents runaway)
+        err = self.target_pos - current_pos_arr
+        dist = np.linalg.norm(err)
+        MAX_TETHER = 0.04  # 4 cm
+        if dist > MAX_TETHER:
+            self.target_pos = current_pos_arr + (err / dist) * MAX_TETHER
 
         WORKSPACE_LIMITS = {
             "X_MIN": 0.35, "X_MAX": 0.85, 
             "Y_MIN": -0.30, "Y_MAX": 0.30, 
             "Z_MIN": 0.02, "Z_MAX": 0.40   
         }
-        new_pos[0] = np.clip(new_pos[0], WORKSPACE_LIMITS["X_MIN"], WORKSPACE_LIMITS["X_MAX"])
-        new_pos[1] = np.clip(new_pos[1], WORKSPACE_LIMITS["Y_MIN"], WORKSPACE_LIMITS["Y_MAX"])
-        new_pos[2] = np.clip(new_pos[2], WORKSPACE_LIMITS["Z_MIN"], WORKSPACE_LIMITS["Z_MAX"])
+        self.target_pos[0] = np.clip(self.target_pos[0], WORKSPACE_LIMITS["X_MIN"], WORKSPACE_LIMITS["X_MAX"])
+        self.target_pos[1] = np.clip(self.target_pos[1], WORKSPACE_LIMITS["Y_MIN"], WORKSPACE_LIMITS["Y_MAX"])
+        self.target_pos[2] = np.clip(self.target_pos[2], WORKSPACE_LIMITS["Z_MIN"], WORKSPACE_LIMITS["Z_MAX"])
+
+        new_pos = self.target_pos.copy()
 
         # 6. Orientation Integration (Axis-Angle to Quaternion)
-        ori_delta_safe = np.clip(ori_delta_vec, -0.1, 0.1) # Max rotation per step
         current_quat = self.latest_eef_pose.pose.orientation
-        current_rot = R.from_quat([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
-        delta_rot = R.from_rotvec(ori_delta_safe)
-        new_rot = delta_rot * current_rot # Local frame rotation
-        new_quat = new_rot.as_quat() # [x, y, z, w]
+        if self.POSITION_ONLY_ORI:
+            # Fix A: Hold current orientation to prevent policy-induced wrist spinning
+            new_quat = np.array([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
+        else:
+            ori_delta_safe = np.clip(ori_delta_vec, -0.1, 0.1) # Max rotation per step
+            current_rot = R.from_quat([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
+            delta_rot = R.from_rotvec(ori_delta_safe)
+            new_rot = delta_rot * current_rot # Local frame rotation
+            new_quat = new_rot.as_quat() # [x, y, z, w]
 
-        # 7. Pack and Publish 31-D Payload
+        # 7. EMA smoothing — damp 10Hz+ policy oscillations before sending
+        if self.ema_pos is None:
+            # First call: warm-start all filters from current values
+            self.ema_pos    = new_pos.copy()
+            self.ema_quat   = new_quat.copy()
+            self.ema_Kp     = K_p.copy()
+            self.ema_Kd     = K_d.copy()
+            self.ema_kp_ori = kp_ori.copy()
+            self.ema_kd_ori = kd_ori.copy()
+        else:
+            self.ema_pos    = self.ALPHA_POS  * new_pos  + (1 - self.ALPHA_POS)  * self.ema_pos
+            # Quaternion EMA: flip sign if dot product is negative to avoid slerp wraparound
+            if np.dot(new_quat, self.ema_quat) < 0:
+                new_quat = -new_quat
+            self.ema_quat   = self.ALPHA_ORI  * new_quat + (1 - self.ALPHA_ORI)  * self.ema_quat
+            self.ema_quat  /= np.linalg.norm(self.ema_quat)  # renormalise
+            self.ema_Kp     = self.ALPHA_STIF * K_p     + (1 - self.ALPHA_STIF) * self.ema_Kp
+            self.ema_Kd     = self.ALPHA_STIF * K_d     + (1 - self.ALPHA_STIF) * self.ema_Kd
+            self.ema_kp_ori = self.ALPHA_STIF * kp_ori  + (1 - self.ALPHA_STIF) * self.ema_kp_ori
+            self.ema_kd_ori = self.ALPHA_STIF * kd_ori  + (1 - self.ALPHA_STIF) * self.ema_kd_ori
+
+        # 8. Pack and Publish 31-D Payload (using EMA-smoothed values)
         payload = np.concatenate([
-            new_pos,                # 3
-            new_quat,               # 4
-            K_p.flatten(),          # 9
-            K_d.flatten(),          # 9
-            kp_ori,                 # 3
-            kd_ori                  # 3
+            self.ema_pos,           # 3
+            self.ema_quat,          # 4
+            self.ema_Kp.flatten(),  # 9
+            self.ema_Kd.flatten(),  # 9
+            self.ema_kp_ori,        # 3
+            self.ema_kd_ori         # 3
         ]).astype(np.float64)
 
         msg = Float64MultiArray()
@@ -366,6 +465,7 @@ class RLEnvNode(Node):
             f"\nSafe target pos: {new_pos}"
             f"\nTarget orientation (quat): {new_quat}"
             f"\nStiffness (Kp_pos diag): {[K_p[0,0], K_p[1,1], K_p[2,2]]}"
+            f"\nStiffness (Kp_ori): {[kp_ori[0], kp_ori[1], kp_ori[2]]}"
             f"\n--------------------------"
         )
 

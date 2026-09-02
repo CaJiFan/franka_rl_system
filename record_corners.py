@@ -9,7 +9,7 @@ class CornerRecorder(Node):
         super().__init__('corner_recorder')
         self.sub = self.create_subscription(PoseStamped, '/franka_robot_state_broadcaster/current_pose', self.pose_cb, 10)
         self.latest_pose = None
-        self.tcp_offset = np.array([0.0, 0.0, 0.185]) # 18.5cm eraser offset along wrist Z-axis
+        self.tcp_offset = np.array([0.0, 0.0, 0.03]) # wiping tool is 3cm in height
 
     def pose_cb(self, msg):
         self.latest_pose = msg

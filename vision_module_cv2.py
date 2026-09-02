@@ -64,12 +64,23 @@ BOARD_DIAGONAL_M = np.sqrt(BOARD_WIDTH_M**2 + BOARD_HEIGHT_M**2)
 #     "BL": np.array([0.7591, -0.1556, 0.0424]), # Bottom-Left
 # }
 
+# ROBOT_CORNERS_BASE (previous board position — 2026-07-31)
+# ROBOT_CORNERS_BASE = {
+#     "TL": np.array([0.5044, -0.1596,  0.0766]),
+#     "TR": np.array([0.5345,  0.1744,  0.0701]),
+#     "BR": np.array([0.7838, -0.1822, -0.0786]),
+#     "BL": np.array([0.7934,  0.1682, -0.0854]),
+# }
+
+# ROBOT_CORNERS_BASE (current board position — 2026-09-01)
+# Measured with 3cm printed wiping tool (tcp_offset = [0, 0, 0.030])
 ROBOT_CORNERS_BASE = {
-    "TL": np.array([0.5044, -0.1596, 0.0766]), # Top-Left
-    "TR": np.array([0.5345, 0.1744, 0.0701]), # Top-Right
-    "BR": np.array([0.7838, -0.1822, -0.0786]), # Bottom-Right
-    "BL": np.array([0.7934, 0.1682, -0.0854]), # Bottom-Left
+    "TL": np.array([0.4137, -0.1549,  0.1546]),  # Top-Left
+    "TR": np.array([0.4162,  0.1976,  0.1517]),  # Top-Right
+    "BR": np.array([0.6212,  0.1843,  0.0018]),  # Bottom-Right
+    "BL": np.array([0.6185, -0.1569,  0.0051]),  # Bottom-Left
 }
+
 
 
 # Control loop target
@@ -311,6 +322,8 @@ class BoardCalibrator:
         self.corners_px = []
         self.H          = None
         self.active     = False
+        # Reference to MarkerPlacer so we can forward non-calibration clicks
+        self.marker_placer = None
 
     def start_calibration(self):
         self.corners_px = []
@@ -319,13 +332,15 @@ class BoardCalibrator:
         print("       1=TL  2=TR  3=BR  4=BL")
 
     def on_mouse(self, event, x, y, flags, param):
-        if not self.active:
-            return
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.corners_px.append((x, y))
-            if len(self.corners_px) == 4:
-                self._compute_homography()
-                self.active = False
+        if self.active:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.corners_px.append((x, y))
+                if len(self.corners_px) == 4:
+                    self._compute_homography()
+                    self.active = False
+        elif self.marker_placer is not None:
+            # Forward clicks to marker placer when not calibrating
+            self.marker_placer.on_mouse(event, x, y, flags, param)
 
     def _compute_homography(self):
         src       = np.array(self.corners_px, dtype=np.float32)
@@ -347,37 +362,285 @@ class BoardCalibrator:
 
 
 # ===========================================================================
-# Thread-safe shared state
+# Manual Marker Placer
+# ===========================================================================
+
+class MarkerPlacer:
+    """
+    Lets the user click up to MAX_MARKERS positions on the camera image.
+    Positions are stored as pixel coordinates and later converted to 3-D
+    robot-frame points by MarkerTracker.initialize().
+
+    Controls:
+      M          – toggle placement mode on/off
+      Left-click – place next marker (only when mode is ON)
+      R          – clear all placed markers
+    """
+    MAX_MARKERS = 5
+
+    def __init__(self):
+        self.active: bool       = False   # placement mode toggle
+        self.points_px: list    = []      # list of (x, y) pixel tuples
+
+    def toggle(self):
+        self.active = not self.active
+        state = "ON" if self.active else "OFF"
+        print(f"[PLACER] Marker placement mode {state}. "
+              f"{'Click on the board to place waypoints.' if self.active else ''}")
+
+    def reset(self):
+        self.points_px = []
+        self.active    = False
+        print("[PLACER] All manual markers cleared.")
+
+    def on_mouse(self, event, x, y, flags, param):
+        if not self.active:
+            return
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if len(self.points_px) >= self.MAX_MARKERS:
+                print(f"[PLACER] Max {self.MAX_MARKERS} markers already placed. "
+                      "Press R to clear.")
+                return
+            self.points_px.append((x, y))
+            idx = len(self.points_px) - 1
+            print(f"[PLACER] Placed M{idx} at pixel ({x}, {y})  "
+                  f"({len(self.points_px)}/{self.MAX_MARKERS})")
+            if len(self.points_px) == self.MAX_MARKERS:
+                self.active = False
+                print("[PLACER] 5 markers placed. Press T to start task.")
+
+
 # ===========================================================================
 
 class VisionState:
     def __init__(self):
-        self._lock    = threading.Lock()
-        self._obs_vec = np.zeros(8, dtype=np.float32)
-        self._eef_pos = None
-        self._eef_quat = None
- 
+        self._lock         = threading.Lock()
+        self._obs_vec      = np.zeros(8, dtype=np.float32)
+        self._eef_pos      = None
+        self._eef_quat     = None
+        # Per-marker data: list of 5 dicts {centroid_3d: np[3], wiped: float}
+        # Zero-padded to always have exactly 5 entries.
+        self._marker_states = [
+            {"centroid_3d": np.zeros(3, dtype=np.float32), "wiped": 1.0}
+            for _ in range(5)
+        ]
+
     def set_eef_pose(self, pos, quat):
         with self._lock:
-            self._eef_pos = np.asarray(pos, dtype=np.float32).copy()
+            self._eef_pos  = np.asarray(pos, dtype=np.float32).copy()
             self._eef_quat = np.asarray(quat, dtype=np.float32).copy()
- 
+
+    def set_marker_states(self, states):
+        """states: list of up to 5 dicts with 'centroid_3d' (np[3]) and 'wiped' (float).
+        Always padded to exactly 5 entries (wiped=1.0 for undetected slots)."""
+        with self._lock:
+            padded = []
+            for i in range(5):
+                if i < len(states):
+                    padded.append({
+                        "centroid_3d": np.asarray(states[i]["centroid_3d"], dtype=np.float32).copy(),
+                        "wiped": float(states[i]["wiped"]),
+                    })
+                else:
+                    padded.append({"centroid_3d": np.zeros(3, dtype=np.float32), "wiped": 1.0})
+            self._marker_states = padded
+
+    def get_marker_states(self):
+        """Returns a list of 5 dicts with 'centroid_3d' and 'wiped'."""
+        with self._lock:
+            return [
+                {"centroid_3d": m["centroid_3d"].copy(), "wiped": m["wiped"]}
+                for m in self._marker_states
+            ]
+
     def update(self, obs_vec):
         with self._lock:
             self._obs_vec = obs_vec.copy()
- 
+
     def get_obs(self):
         with self._lock:
             return self._obs_vec.copy()
- 
+
     def get_eef_pose(self):
         with self._lock:
             if self._eef_pos is None or self._eef_quat is None:
                 return None, None
             return self._eef_pos.copy(), self._eef_quat.copy()
- 
- 
+
+
 vision_state = VisionState()
+
+
+# ===========================================================================
+# Multi-Marker Tracker
+# ===========================================================================
+
+class MarkerTracker:
+    """
+    Tracks up to 5 individual marker blobs on the whiteboard.
+
+    Lifecycle:
+      initialize(mask_01, H_board) — called on T press: detects blobs,
+          records each marker's centroid + area, sorts by robot Y (ascending).
+      update(mask_01) — called each frame: re-measures each marker's remaining
+          area inside a circular search window; marks wiped when < WIPE_RATIO.
+      get_marker_states() — returns list of 5 zero-padded dicts.
+    """
+    MAX_MARKERS  = 5
+    WIPE_RATIO   = 0.20   # marker counted wiped when area < 20 % of start
+    SEARCH_R_PX  = 100    # pixel radius to re-detect each marker per frame
+
+    def __init__(self):
+        self.markers: list[dict] = []  # {cx_px, cy_px, centroid_3d, start_area, current_area, wiped}
+        self.total_start_area: float = 0.0
+        self.initialized: bool = False
+
+    # ------------------------------------------------------------------
+    @property
+    def active_idx(self) -> int:
+        for i, m in enumerate(self.markers):
+            if not m["wiped"]:
+                return i
+        return len(self.markers)
+
+    @property
+    def active_marker(self):
+        idx = self.active_idx
+        return self.markers[idx] if idx < len(self.markers) else None
+
+    @property
+    def proportion_wiped(self) -> float:
+        if self.total_start_area <= 0:
+            return 0.0
+        remaining = sum(m["current_area"] for m in self.markers)
+        return float(np.clip(1.0 - remaining / self.total_start_area, 0.0, 1.0))
+
+    # ------------------------------------------------------------------
+    def _px_to_3d(self, cx_px, cy_px, H_board):
+        """Map image pixel to robot-frame 3D via homography + bilinear interp."""
+        pt    = np.array([[[cx_px, cy_px]]], dtype=np.float32)
+        pt_b  = cv2.perspectiveTransform(pt, H_board)[0, 0]
+        TL = ROBOT_CORNERS_BASE["TL"]
+        TR = ROBOT_CORNERS_BASE["TR"]
+        BR = ROBOT_CORNERS_BASE["BR"]
+        BL = ROBOT_CORNERS_BASE["BL"]
+        top_pt = TL + pt_b[0] * (TR - TL)
+        bot_pt = BL + pt_b[0] * (BR - BL)
+        return (top_pt + pt_b[1] * (bot_pt - top_pt)).astype(np.float32)
+
+    def _area_in_neighborhood(self, mask_01, cx_px, cy_px):
+        """Count ink pixels within SEARCH_R_PX of (cx_px, cy_px)."""
+        h, w = mask_01.shape[:2]
+        # Build circular neighbourhood mask
+        ys, xs = np.ogrid[:h, :w]
+        circle = (xs - cx_px) ** 2 + (ys - cy_px) ** 2 <= self.SEARCH_R_PX ** 2
+        return float(np.count_nonzero(mask_01 & circle))
+
+    # ------------------------------------------------------------------
+    def initialize(self, mask_01, H_board, manual_px=None):
+        """
+        Initialize marker tracking.
+
+        If manual_px is provided (list of (x, y) pixel tuples from MarkerPlacer),
+        those positions are used directly as marker centroids — no blob detection.
+        Otherwise falls back to automatic blob detection via findContours.
+
+        In both cases markers are sorted by robot Y (ascending).
+        """
+        self.markers = []
+        self.total_start_area = 0.0
+        self.initialized = False
+
+        if H_board is None:
+            print("[MARKER] Cannot initialise: no homography calibration found.")
+            return
+
+        blobs = []
+
+        if manual_px:
+            # ── Manual mode: use clicked pixel positions ──────────────────────
+            print(f"[MARKER] Using {len(manual_px)} manually-placed marker(s).")
+            for (px, py) in manual_px[:self.MAX_MARKERS]:
+                # Measure ink area around this click point for wipe detection
+                area = self._area_in_neighborhood(mask_01, px, py)
+                blobs.append({"cx_px": px, "cy_px": py, "area": max(area, 1.0)})
+        else:
+            # ── Auto mode: detect blobs from ink mask ─────────────────────────
+            print("[MARKER] Auto-detecting blobs from ink mask...")
+            cnts, _ = cv2.findContours(
+                (mask_01 * 255).astype(np.uint8),
+                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for c in cnts:
+                area = cv2.contourArea(c)
+                if area < 20:
+                    continue
+                M = cv2.moments(c)
+                if M["m00"] == 0:
+                    continue
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                blobs.append({"cx_px": cx, "cy_px": cy, "area": area})
+
+            if not blobs:
+                print("[MARKER] No blobs detected — draw markers or use M+click to place manually!")
+                return
+
+        # Compute 3D centroid for each blob/click
+        for b in blobs:
+            b["centroid_3d"] = self._px_to_3d(b["cx_px"], b["cy_px"], H_board)
+
+        # Sort by robot Y ascending (sim convention: lowest Y first)
+        blobs.sort(key=lambda b: b["centroid_3d"][1])
+        blobs = blobs[:self.MAX_MARKERS]
+
+        for b in blobs:
+            self.markers.append({
+                "cx_px":       b["cx_px"],
+                "cy_px":       b["cy_px"],
+                "centroid_3d": b["centroid_3d"],
+                "start_area":  b["area"],
+                "current_area": b["area"],
+                "wiped":       False,
+            })
+            self.total_start_area += b["area"]
+
+        self.initialized = True
+        positions = [(m["centroid_3d"][0], m["centroid_3d"][1], m["centroid_3d"][2])
+                     for m in self.markers]
+        print(f"[MARKER] Initialized {len(self.markers)} marker(s), sorted by Y:")
+        for i, p in enumerate(positions):
+            print(f"  M{i}: X={p[0]:+.3f}  Y={p[1]:+.3f}  Z={p[2]:+.3f}")
+
+    def update(self, mask_01):
+        """Re-measure each marker's area; advance active index when wiped."""
+        if not self.initialized:
+            return
+        for m in self.markers:
+            if m["wiped"]:
+                m["current_area"] = 0.0
+                continue
+            area = self._area_in_neighborhood(mask_01, m["cx_px"], m["cy_px"])
+            m["current_area"] = area
+            if m["start_area"] > 0 and area < m["start_area"] * self.WIPE_RATIO:
+                m["wiped"] = True
+                print(f"[MARKER] M{self.markers.index(m)} wiped! "
+                      f"({area:.0f} px < {m['start_area'] * self.WIPE_RATIO:.0f} px threshold)")
+
+    def get_marker_states(self) -> list:
+        """Returns exactly 5 dicts (zero-padded). Used by VisionState.set_marker_states."""
+        states = []
+        for i in range(self.MAX_MARKERS):
+            if i < len(self.markers):
+                m = self.markers[i]
+                states.append({
+                    "centroid_3d": m["centroid_3d"],
+                    "wiped": 1.0 if m["wiped"] else 0.0,
+                })
+            else:
+                # Undetected slot: zero position, treated as already wiped
+                states.append({"centroid_3d": np.zeros(3, dtype=np.float32), "wiped": 1.0})
+        return states
 
 
 # ===========================================================================
@@ -414,6 +677,9 @@ def run_vision_loop(half_frame=False, cam_index=0):
     calibrator = BoardCalibrator()
     calibrator.load()
 
+    marker_placer = MarkerPlacer()
+    calibrator.marker_placer = marker_placer   # forward non-calib clicks
+
     win = "Wipe Vision Module - OpenCV Generic"
     cv2.namedWindow(win)
     cv2.setMouseCallback(win, calibrator.on_mouse)
@@ -423,16 +689,17 @@ def run_vision_loop(half_frame=False, cam_index=0):
     cv2.createTrackbar("Max Area (px2)",           win, DEFAULT_MAX_AREA,         30000, nothing)
     cv2.createTrackbar("Close Radius (holes)",     win, DEFAULT_CLOSE_RAD,        20,  nothing)
 
-    task_start_area_px = 0.0
-    task_started       = False
-    task_start_centroid = None
-    task_start_centroid_px = None
-    locked_target_px   = None
+    marker_tracker   = MarkerTracker()
+    task_started     = False
+    locked_target_px = None
 
     print("\n[VIS] Controls:")
-    print("   c - calibrate corners  |  t - Start Task (registers ink as 0% wiped)")
+    print("   c - calibrate corners  |  t - Start Task")
+    print("   m - toggle marker placement mode (then click board to place waypoints)")
+    print("   r - reset / clear placed markers")
     print("   s - save calib         |  l - load calib")
-    print("   q / ESC - quit\n")
+    print("   q / ESC - quit")
+    print("   TIP: Place markers manually with M+click, then press T to start.\n")
 
     period   = 1.0 / CONTROL_HZ
     t_period = time.time()
@@ -537,32 +804,32 @@ def run_vision_loop(half_frame=False, cam_index=0):
             ink_obs = compute_ink_obs(
                 mask_01,
                 calibrator.H,
-                task_start_area_px,
+                marker_tracker.total_start_area,  # was task_start_area_px
                 prev_target_px=locked_target_px,
                 lock_dist_px=TARGET_LOCK_DIST_PX,
             )
             locked_target_px = ink_obs["centroid_px"]
 
-            # Lock the centroid to the start of the task if requested (trial duration lock)
-            if task_started and task_start_centroid is not None:
-                ink_obs["wipe_centroid"] = task_start_centroid.copy()
-                ink_obs["centroid_px"] = task_start_centroid_px
+            # ── Update marker tracker each frame ─────────────────────────────
+            if task_started and marker_tracker.initialized:
+                marker_tracker.update(mask_01)
 
+            # Push per-marker states to shared VisionState for ROS publishing
+            vision_state.set_marker_states(marker_tracker.get_marker_states())
+
+            # Console log @ CONTROL_HZ
             eef_pos, _ = vision_state.get_eef_pose()
             obs_vec = build_obs_vector(ink_obs, eef_pos)
             vision_state.update(obs_vec)
 
-            # ── Console log @ CONTROL_HZ ──────────────────────────────────────
             now = time.time()
             if now - t_period >= period:
                 t_period = now
-                c   = ink_obs["wipe_centroid"]
-                g2c = obs_vec[5:8]
+                am = marker_tracker.active_marker
+                active_str = f"M{marker_tracker.active_idx}" if am else "ALL DONE"
                 print(
-                    f"\r[OBS] "
-                    f"cent=({c[0]:+.3f},{c[1]:+.3f})m  "
-                    f"wiped={ink_obs['proportion_wiped']*100:5.1f}%  "
-                    f"eef->c=({g2c[0]:+.3f},{g2c[1]:+.3f},{g2c[2]:+.3f})  "
+                    f"\r[MARKER] Active={active_str}  "
+                    f"wiped={marker_tracker.proportion_wiped*100:5.1f}%  "
                     f"strokes={len(ink_obs.get('contours',[]))}  "
                     f"area={ink_obs['ink_area_px']:.0f}px",
                     end="", flush=True,
@@ -581,12 +848,31 @@ def run_vision_loop(half_frame=False, cam_index=0):
             if ink_obs.get("contours"):
                 cv2.drawContours(vis, ink_obs["contours"], -1, (255, 200, 0), 1)
 
-            if ink_obs["centroid_px"] is not None:
-                cx, cy = ink_obs["centroid_px"]
-                if ink_obs.get("largest_contour") is not None:
-                    cv2.drawContours(vis, [ink_obs["largest_contour"]], -1, (0, 255, 0), 2)
-                cv2.circle(vis, (cx, cy), 12, (0, 255, 0), 2)
-                cv2.drawMarker(vis, (cx, cy), (0, 255, 0), cv2.MARKER_CROSS, 24, 2)
+            # ── Per-marker visualization ──────────────────────────────────────
+            MARKER_COLORS = {
+                "active":  (0,   255, 0),    # green
+                "pending": (0,   165, 255),  # orange
+                "wiped":   (120, 120, 120),  # grey
+            }
+            if marker_tracker.initialized:
+                for mi, m in enumerate(marker_tracker.markers):
+                    # Use the stored pixel position directly — no back-projection needed
+                    px, py = int(m["cx_px"]), int(m["cy_px"])
+                    if mi == marker_tracker.active_idx:
+                        color = MARKER_COLORS["active"]
+                        cv2.circle(vis, (px, py), 18, color, 3)
+                        cv2.drawMarker(vis, (px, py), color, cv2.MARKER_CROSS, 36, 2)
+                    elif m["wiped"]:
+                        color = MARKER_COLORS["wiped"]
+                        cv2.circle(vis, (px, py), 16, color, 2)
+                        cv2.putText(vis, "v", (px - 5, py + 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    else:
+                        color = MARKER_COLORS["pending"]
+                        cv2.circle(vis, (px, py), 16, color, 2)
+                    cv2.putText(vis, f"M{mi}", (px - 8, py - 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+
 
             if eef_pos is not None and 'eef_cx' in locals() and 'eef_cy' in locals():
                 # Draw the EEF circular mask
@@ -610,12 +896,39 @@ def run_vision_loop(half_frame=False, cam_index=0):
                 for (px, py) in calibrator.corners_px:
                     cv2.circle(vis, (px, py), 6, (0, 140, 255), -1)
 
+            # ── Pending manual marker positions (before T) ────────────────────
+            if not task_started and marker_placer.points_px:
+                for mi, (px, py) in enumerate(marker_placer.points_px):
+                    col = (255, 255, 0)  # cyan
+                    cv2.circle(vis, (px, py), 16, col, 2)
+                    cv2.drawMarker(vis, (px, py), col, cv2.MARKER_CROSS, 28, 2)
+                    cv2.putText(vis, f"M{mi}", (px - 8, py - 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+            if marker_placer.active:
+                cv2.putText(vis, f"[PLACE MODE] Click board to place M{len(marker_placer.points_px)}",
+                            (10, vis.shape[0] - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
+
+            # Per-marker status string: M0✓ M1● M2○ ...
+            if marker_tracker.initialized:
+                mstatus = []
+                for mi, m in enumerate(marker_tracker.markers):
+                    sym = "✓" if m["wiped"] else ("●" if mi == marker_tracker.active_idx else "○")
+                    mstatus.append(f"M{mi}{sym}")
+                # Pad undetected slots
+                for mi in range(len(marker_tracker.markers), 5):
+                    mstatus.append(f"M{mi}-")
+                marker_hud = "  ".join(mstatus)
+                am = marker_tracker.active_marker
+                act_pos = f"({am['centroid_3d'][0]:+.3f},{am['centroid_3d'][1]:+.3f})" if am else "DONE"
+            else:
+                marker_hud = "Press T to start"
+                act_pos = "---"
+
             hud = [
-                f"Wiped: {ink_obs['proportion_wiped']*100:5.1f}%  |  Strokes: {len(ink_obs.get('contours',[]))}",
-                f"Target Centroid: ({ink_obs['wipe_centroid'][0]:+.3f}, {ink_obs['wipe_centroid'][1]:+.3f}) m",
-                f"Total Ink Area: {ink_obs['ink_area_px']:.0f} px",
-                f"Task Start Area: {task_start_area_px:.0f} px  ({'SET v' if task_started else 'NOT SET - press T'})",
-                f"EEF->Cent: ({obs_vec[5]:+.3f}, {obs_vec[6]:+.3f}, {obs_vec[7]:+.3f}) m",
+                f"Markers: {marker_hud}",
+                f"Active:  {act_pos} m  |  Wiped: {marker_tracker.proportion_wiped*100:5.1f}%",
+                f"Total Ink Area: {ink_obs['ink_area_px']:.0f} px  ({'TASK RUNNING' if task_started else 'press T to start'})",
                 f"Camera: OpenCV Generic",
                 f"--- Trackbars ---",
                 f"Otsu Offset: {otsu_offset} | Min Area: {min_area} px2 | Max Area: {max_area} px2 | Close Rad: {close_rad}",
@@ -657,12 +970,21 @@ def run_vision_loop(half_frame=False, cam_index=0):
                 break
             elif key == ord('c'):
                 calibrator.start_calibration()
+            elif key == ord('m'):
+                marker_placer.toggle()
+            elif key == ord('r'):
+                marker_placer.reset()
+                marker_tracker.initialized = False  # also reset live tracker
+                marker_tracker.markers = []
+                task_started = False
+                print("[VIS] Task reset. Place new markers with M+click, then press T.")
             elif key == ord('t'):
-                task_start_area_px = ink_obs["ink_area_px"]
-                task_start_centroid = ink_obs["wipe_centroid"].copy() if ink_obs["wipe_centroid"] is not None else None
-                task_start_centroid_px = ink_obs["centroid_px"]
-                task_started       = True
-                print(f"\n[VIS] TASK STARTED. Initial dirt area: {task_start_area_px:.0f} px, locked centroid: {task_start_centroid}")
+                # Use manually-placed markers if available, else auto-detect
+                manual = marker_placer.points_px if marker_placer.points_px else None
+                marker_tracker.initialize(mask_01, calibrator.H, manual_px=manual)
+                task_started = True
+                mode = "manual" if manual else "auto"
+                print(f"\n[VIS] TASK STARTED ({mode}). {len(marker_tracker.markers)} marker(s).")
             elif key == ord('s'):
                 calibrator.save()
             elif key == ord('l'):

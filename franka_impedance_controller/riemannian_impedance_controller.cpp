@@ -77,6 +77,10 @@ void RiemannianImpedanceController::payloadCallback(const std_msgs::msg::Float64
   K_p_ori_ << msg->data[25], msg->data[26], msg->data[27];
   // 3 Kd_ori
   K_d_ori_ << msg->data[28], msg->data[29], msg->data[30];
+
+  // Dead-man's switch: record time of last valid command
+  last_cmd_time_ = get_node()->get_clock()->now();
+  cmd_received_  = true;
 }
 
 controller_interface::CallbackReturn RiemannianImpedanceController::on_activate(
@@ -103,8 +107,25 @@ controller_interface::CallbackReturn RiemannianImpedanceController::on_deactivat
 }
 
 controller_interface::return_type RiemannianImpedanceController::update(
-    const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {
-    
+    const rclcpp::Time& time, const rclcpp::Duration& /*period*/) {
+
+  // ── Dead-man's switch ────────────────────────────────────────────────────
+  // If the RL publisher dies (Ctrl+C), freeze target at current robot pose
+  // to prevent continued tracking of a stale oscillating target.
+  if (cmd_received_) {
+    double elapsed = (time - last_cmd_time_).seconds();
+    if (elapsed > CMD_TIMEOUT_SEC) {
+      // Snap target to live robot pose so error_pos / error_ori -> 0
+      std::array<double, 16> live_pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+      Eigen::Affine3d live_tf(Eigen::Matrix4d::Map(live_pose.data()));
+      position_d_    = live_tf.translation();
+      orientation_d_ = Eigen::Quaterniond(live_tf.rotation());
+      // Log once per second at most
+      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+          "[RiemannianImpedanceController] No cmd for %.2f s — holding current pose.", elapsed);
+    }
+  }
+
   std::array<double, 42> jacobian_array = franka_robot_model_->getZeroJacobian(franka::Frame::kEndEffector);
   Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
   

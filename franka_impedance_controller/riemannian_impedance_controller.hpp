@@ -45,6 +45,11 @@ class RiemannianImpedanceController : public controller_interface::ControllerInt
   const std::string state_interface_name_{"robot_state"};
   const std::string robot_model_interface_name_{"robot_model"};
 
+  // Dead-man's switch: freeze target if publisher stops sending
+  rclcpp::Time last_cmd_time_;
+  bool cmd_received_{false};          // true after first message
+  const double CMD_TIMEOUT_SEC{0.5};  // freeze after 500 ms of silence
+
   void payloadCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 };
 
