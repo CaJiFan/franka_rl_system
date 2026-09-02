@@ -70,6 +70,9 @@ class RLEnvNode(Node):
         # Fix A: Hold current orientation and ignore policy orientation commands to eliminate wrist spin
         self.POSITION_ONLY_ORI = True
 
+        # Action mapping flags: set True if policy action Y is inverted relative to robot frame
+        self.INVERT_ACTION_Y = False
+
 
         if self.use_zmq:
             # --- ZMQ Client Setup ---
@@ -127,11 +130,11 @@ class RLEnvNode(Node):
         self.prev_joint_vel  = None   # for joint_acc estimation
         self.last_update_time = None
 
-        # ── EMA smoothing state (Fix 1 & Fix B: damp high-freq policy oscillations) ──
+        # ── EMA smoothing state (damp high-freq policy oscillations) ──
         # Lower alpha = heavier smoothing, Higher alpha = more responsive
-        self.ALPHA_POS  = 0.40   # position target (Fix B: increased from 0.15 to allow faster position tracking)
-        self.ALPHA_ORI  = 0.20   # orientation target (SLERP-like approximation)
-        self.ALPHA_STIF = 0.10   # stiffness matrices (slowest — avoids torque spikes)
+        self.ALPHA_POS  = 0.40   # position target (responsive tracking)
+        self.ALPHA_ORI  = 0.10   # orientation target (prevents rotational twitching)
+        self.ALPHA_STIF = 0.05   # stiffness matrices (heavy smoothing — prevents torque spikes from Kp jumps)
         self.ema_pos    = None   # np.ndarray(3,)  — initialised on first action
         self.ema_quat   = None   # np.ndarray(4,)  — [x,y,z,w]
         self.ema_Kp     = None   # np.ndarray(3,3)
@@ -141,6 +144,7 @@ class RLEnvNode(Node):
 
         # Integrated position target (accumulates delta to overcome static joint friction)
         self.target_pos = None
+        self.prev_active_idx = None
 
         # --- Subscribers ---
         self.create_subscription(JointState,     '/joint_states',                                                        self.joint_cb,   10)
@@ -223,6 +227,12 @@ class RLEnvNode(Node):
         # active waypoint: first non-wiped marker
         active_idx = next((i for i, w in enumerate(marker_wiped) if w[0] < 0.5), 4)
         gripper_to_active_waypoint = gripper_to_marker[active_idx].copy()
+
+        # Re-sync target_pos when active marker changes to prevent lingering lag from previous marker
+        if self.prev_active_idx is not None and active_idx != self.prev_active_idx:
+            self.get_logger().info(f"[WAYPOINT SWITCH] Active marker M{self.prev_active_idx} -> M{active_idx}! Re-syncing target position.")
+            self.target_pos = None
+        self.prev_active_idx = active_idx
 
         # ── Assemble 85-D observation (STRICT KEY ORDER) ──────────────────────
         # Proprioception (47-D)
@@ -382,7 +392,10 @@ class RLEnvNode(Node):
             kp_ori = np.full(3, self.FIXED_KP_ORI)
             kd_ori = 2.0 * np.sqrt(kp_ori)
 
-        # 5. Position Integration & Safety Workspace (Integrated target with 4cm safety tether)
+        # 5. Position Integration & Safety Workspace
+        if self.INVERT_ACTION_Y:
+            pos_delta[1] = -pos_delta[1]
+
         # Cap max delta to 1cm per step (0.2 m/s at 20Hz)
         pos_delta_safe = np.clip(pos_delta, -0.01, 0.01) 
         current_pos = self.latest_eef_pose.pose.position
@@ -393,18 +406,29 @@ class RLEnvNode(Node):
         else:
             self.target_pos += pos_delta_safe
 
-        # Safety tether: clamp target error to max 4 cm from live robot position
-        # (Allows force to scale up to 6 N at Kp=150 N/m to break joint stiction, but prevents runaway)
-        err = self.target_pos - current_pos_arr
-        dist = np.linalg.norm(err)
-        MAX_TETHER = 0.04  # 4 cm
-        if dist > MAX_TETHER:
-            self.target_pos = current_pos_arr + (err / dist) * MAX_TETHER
+        # Decoupled safety tether:
+        #  - XY (wiping plane): 10 cm tether max -> 15 N pushing force to slide past surface friction
+        #  - Z  (pressing axis): 3 cm tether max -> 4.5 N gentle pressing force to prevent sticking
+        err_xy = self.target_pos[:2] - current_pos_arr[:2]
+        dist_xy = np.linalg.norm(err_xy)
+        if dist_xy > 0.10:
+            self.target_pos[:2] = current_pos_arr[:2] + (err_xy / dist_xy) * 0.10
+
+        err_z = self.target_pos[2] - current_pos_arr[2]
+        if abs(err_z) > 0.03:
+            self.target_pos[2] = current_pos_arr[2] + np.sign(err_z) * 0.03
+
+        # Tilted Whiteboard Surface Equation (derived from ROBOT_CORNERS_BASE: TL Z=0.1546m -> BL Z=0.0051m)
+        # Slope dZ/dX = -0.727 (37-degree incline)
+        x_target = self.target_pos[0]
+        z_surface = 0.1546 - 0.727 * (x_target - 0.4137)
+        # Dynamic Z_MIN: allow target to push at most 2.5 cm below local board surface plane
+        z_min_dynamic = float(np.clip(z_surface - 0.025, -0.01, 0.40))
 
         WORKSPACE_LIMITS = {
-            "X_MIN": 0.35, "X_MAX": 0.85, 
+            "X_MIN": 0.35, "X_MAX": 0.75, 
             "Y_MIN": -0.30, "Y_MAX": 0.30, 
-            "Z_MIN": 0.02, "Z_MAX": 0.40   
+            "Z_MIN": z_min_dynamic, "Z_MAX": 0.40   
         }
         self.target_pos[0] = np.clip(self.target_pos[0], WORKSPACE_LIMITS["X_MIN"], WORKSPACE_LIMITS["X_MAX"])
         self.target_pos[1] = np.clip(self.target_pos[1], WORKSPACE_LIMITS["Y_MIN"], WORKSPACE_LIMITS["Y_MAX"])

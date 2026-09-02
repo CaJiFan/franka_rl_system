@@ -779,10 +779,10 @@ def run_vision_loop(half_frame=False, cam_index=0):
                     if 0 <= eef_cx < w and 0 <= eef_cy < h:
                         cv2.circle(board_mask, (eef_cx, eef_cy), 45, 0, -1)
                         
-                        # Draw a thick black line to cover the camera cable running to the TL corner (thickness = 80px)
-                        if len(calibrator.corners_px) > 0:
-                            TL_px = calibrator.corners_px[0]
-                            cv2.line(board_mask, (eef_cx, eef_cy), (int(TL_px[0]), int(TL_px[1])), 0, 80)
+                        # (Cable mask line disabled to prevent digitally erasing ink on the board)
+                        # if len(calibrator.corners_px) > 0:
+                        #     TL_px = calibrator.corners_px[0]
+                        #     cv2.line(board_mask, (eef_cx, eef_cy), (int(TL_px[0]), int(TL_px[1])), 0, 80)
                             
                     # Mask physical eraser tool assembly (90px radius around the eraser tip)
                     # ONLY apply this mask when the eraser is close to the board (Z < 0.22) to avoid parallax errors when high up!
@@ -885,12 +885,12 @@ def run_vision_loop(half_frame=False, cam_index=0):
                         cv2.circle(vis, (eraser_cx, eraser_cy), 90, (255, 120, 0), 2)
                         cv2.putText(vis, "ERASER MASK", (eraser_cx - 35, eraser_cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 120, 0), 1)
                 
-                # Draw the cable line mask visual (semi-transparent line using alpha overlay)
-                if len(calibrator.corners_px) > 0:
-                    TL_px = calibrator.corners_px[0]
-                    overlay = vis.copy()
-                    cv2.line(overlay, (eef_cx, eef_cy), (int(TL_px[0]), int(TL_px[1])), (255, 120, 0), 80)
-                    cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
+                # Draw the cable line mask visual (disabled)
+                # if len(calibrator.corners_px) > 0:
+                #     TL_px = calibrator.corners_px[0]
+                #     overlay = vis.copy()
+                #     cv2.line(overlay, (eef_cx, eef_cy), (int(TL_px[0]), int(TL_px[1])), (255, 120, 0), 80)
+                #     cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
 
             if calibrator.active:
                 for (px, py) in calibrator.corners_px:
