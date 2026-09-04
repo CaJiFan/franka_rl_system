@@ -1,0 +1,44 @@
+TIMESTAMP: 2026-09-04_21-04-09
+
+╔══════════════════════════════════════════════════════════════════════╗
+║                ICRA REAL-WORLD ROLLOUT METRICS REPORT                ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ Config: SPD_DR                Method: SPD       Duration: 39.40s  ║
+╟──────────────────────────────────────────────────────────────────────╢
+║ CONTACT FORCE METRICS (Surface Contact Threshold: > 3.0 N)           ║
+║   • Mean Normal Force (Fz_mean)     :   4.38 N                      ║
+║   • Peak Normal Force (Fz_peak)     :   8.43 N                      ║
+║   • Optimal Window (5N <= Fz <= 10N):   27.7 %                      ║
+║   • Safety Violations  (Fz > 10N)   :    0.0 %                      ║
+║   • Hardware Violations(Fz > 15N)   :    0.0 %                      ║
+╟──────────────────────────────────────────────────────────────────────╢
+║ STIFFNESS / IMPEDANCE METRICS                                        ║
+║   • Physical SPD Validity Rate      :  100.0 %                      ║
+║   • Mean Stiffness Ellipsoid Volume : 4606.625                        ║
+║   • Mean Anisotropy (Cond Number k) :   1.93                        ║
+║   • Mean Riemannian Jerk (AIRM d)   : 0.0245                        ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+RAW METRICS JSON:
+{
+    "config": "SPD_DR",
+    "obs_mode": "MULTI_MARKER_85D",
+    "method": "SPD",
+    "timestamp": "2026-09-04_21-04-09",
+    "task_duration_sec": 39.4,
+    "active_contact_step_count": 703,
+    "contact_force_threshold_N": 3.0,
+    "force_metrics": {
+        "Fz_mean_N": 4.38,
+        "Fz_peak_N": 8.43,
+        "optimal_force_window_5_to_10N_pct": 27.7,
+        "safety_violations_gt_10N_pct": 0.0,
+        "hardware_violations_gt_15N_pct": 0.0
+    },
+    "impedance_metrics": {
+        "spd_validity_rate_pct": 100.0,
+        "mean_ellipsoid_volume": 4606.625,
+        "mean_anisotropy_condition_number": 1.93,
+        "mean_airm_riemannian_jerk": 0.0245
+    }
+}

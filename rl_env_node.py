@@ -12,8 +12,10 @@ from rclpy.node import Node
 import numpy as np
 import zmq
 import math
+import json
+from datetime import datetime
 from scipy.spatial.transform import Rotation as R
-from scipy.linalg import expm
+from scipy.linalg import expm, logm, sqrtm, inv
 import os
 import sys
 
@@ -63,12 +65,20 @@ class RLEnvNode(Node):
         # Set True to ignore policy stiffness and use a fixed Kp=150 N/m diagonal
         # (critical damping applied automatically). Useful for isolating whether
         # position tracking is correct before trusting the learned stiffness.
-        self.POSITION_ONLY_MODE = True
+        self.POSITION_ONLY_MODE = False
         self.FIXED_KP  = 150.0   # N/m  (translational)
-        self.FIXED_KP_ORI = 50.0 # N·m/rad (rotational, ~10% of translational)
+        self.FIXED_KP_ORI = 5.0  # N·m/rad (rotational compliance: allows wiping pad to lay 100% flat on tilted board)
 
         # Fix A: Hold current orientation and ignore policy orientation commands to eliminate wrist spin
-        self.POSITION_ONLY_ORI = True
+        self.POSITION_ONLY_ORI = False
+
+        # Set True to use waypoint guidance for smooth continuous real-robot demos.
+        # Set False for 100% pure unassisted RL policy action execution (raw SAC deltas).
+        self.USE_WAYPOINT_GUIDANCE = True
+
+        # Set True to cap tracking error (tether) relative to current robot position.
+        # Set False to disable the tether completely for unconstrained spatial tracking.
+        self.USE_SAFETY_TETHER = False
 
         # Action mapping flags: set True if policy action Y is inverted relative to robot frame
         self.INVERT_ACTION_Y = False
@@ -132,9 +142,9 @@ class RLEnvNode(Node):
 
         # ── EMA smoothing state (damp high-freq policy oscillations) ──
         # Lower alpha = heavier smoothing, Higher alpha = more responsive
-        self.ALPHA_POS  = 0.40   # position target (responsive tracking)
-        self.ALPHA_ORI  = 0.10   # orientation target (prevents rotational twitching)
-        self.ALPHA_STIF = 0.05   # stiffness matrices (heavy smoothing — prevents torque spikes from Kp jumps)
+        self.ALPHA_POS  = 0.85   # position target (responsive, fast tracking)
+        self.ALPHA_ORI  = 0.70   # orientation target (responsive rotational tracking)
+        self.ALPHA_STIF = 0.10   # stiffness matrices (damps impedance fluctuations)
         self.ema_pos    = None   # np.ndarray(3,)  — initialised on first action
         self.ema_quat   = None   # np.ndarray(4,)  — [x,y,z,w]
         self.ema_Kp     = None   # np.ndarray(3,3)
@@ -145,6 +155,21 @@ class RLEnvNode(Node):
         # Integrated position target (accumulates delta to overcome static joint friction)
         self.target_pos = None
         self.prev_active_idx = None
+
+        # ── ICRA Evaluation & Metric Logging State ───────────────────────────
+        self.fz_history = []
+        self.contact_step_count = 0
+        self.optimal_force_count = 0        # 5.0 N <= Fz <= 10.0 N
+        self.safety_violation_count = 0     # Fz > 10.0 N
+        self.hardware_violation_count = 0   # Fz > 15.0 N
+        self.kp_volume_history = []
+        self.kp_anisotropy_history = []
+        self.kp_spd_valid_count = 0
+        self.airm_jerk_history = []
+        self.prev_Kp_mat = None
+        self.start_time_sec = None
+        self.latest_fz_current = 0.0
+        self.metrics_exported = False
 
         # --- Subscribers ---
         self.create_subscription(JointState,     '/joint_states',                                                        self.joint_cb,   10)
@@ -174,6 +199,8 @@ class RLEnvNode(Node):
 
         # Delta time
         now_time = self.get_clock().now()
+        if self.start_time_sec is None:
+            self.start_time_sec = now_time
         dt = 0.05
         if self.last_update_time is not None:
             dt = (now_time - self.last_update_time).nanoseconds / 1e9
@@ -208,12 +235,11 @@ class RLEnvNode(Node):
 
         # ── Contact & F/T ────────────────────────────────────────────────────
         force  = self.latest_wrench.wrench.force
-        torque = self.latest_wrench.wrench.torque
-        robot0_contact_force  = np.array([force.x,  force.y,  force.z],  dtype=np.float32)
-
-        # Contact: threshold on Z-axis normal force (|Fz| > 2 N), matching sim
+        robot0_contact_force = np.array([force.x, force.y, force.z], dtype=np.float32)
+        fz_current = float(abs(robot0_contact_force[2]))
+        self.latest_fz_current = fz_current
         robot0_contact = np.array(
-            [1.0 if abs(robot0_contact_force[2]) > 2.0 else 0.0], dtype=np.float32
+            [1.0 if fz_current > 2.0 else 0.0], dtype=np.float32
         )
 
         # ── Vision: marker states from /wipe_markers (20 floats) ─────────────
@@ -224,14 +250,24 @@ class RLEnvNode(Node):
         # gripper-to-marker vectors
         gripper_to_marker = [mp - eef_pos_eraser for mp in marker_pos]
 
-        # active waypoint: first non-wiped marker
-        active_idx = next((i for i, w in enumerate(marker_wiped) if w[0] < 0.5), 4)
-        gripper_to_active_waypoint = gripper_to_marker[active_idx].copy()
+        # active waypoint: first non-wiped marker (5 if all wiped)
+        active_idx = next((i for i, w in enumerate(marker_wiped) if w[0] < 0.5), 5)
+        self.all_wiped = (active_idx == 5)
 
-        # Re-sync target_pos when active marker changes to prevent lingering lag from previous marker
+        if active_idx < 5:
+            gripper_to_active_waypoint = gripper_to_marker[active_idx].copy()
+        else:
+            gripper_to_active_waypoint = np.zeros(3, dtype=np.float32)
+        self.latest_g2active_wp = gripper_to_active_waypoint.copy()
+
+        # Smooth Waypoint Transition & Automatic ICRA Metric Export
         if self.prev_active_idx is not None and active_idx != self.prev_active_idx:
-            self.get_logger().info(f"[WAYPOINT SWITCH] Active marker M{self.prev_active_idx} -> M{active_idx}! Re-syncing target position.")
-            self.target_pos = None
+            if active_idx == 5:
+                self.get_logger().info("🎉 [TASK COMPLETED] All markers wiped! Returning to Franka Desk Home Pose...")
+                if not self.metrics_exported:
+                    self.export_icra_metrics()
+            else:
+                self.get_logger().info(f"[WAYPOINT SWITCH] Active marker M{self.prev_active_idx} -> M{active_idx}! Smoothly continuing surface wipe.")
         self.prev_active_idx = active_idx
 
         # ── Assemble 85-D observation (STRICT KEY ORDER) ──────────────────────
@@ -273,6 +309,10 @@ class RLEnvNode(Node):
                 f"g2m={_fmt(gripper_to_marker[i])}"
             )
 
+        fz_peak = max(self.fz_history) if self.fz_history else 0.0
+        fz_mean = float(np.mean(self.fz_history)) if self.fz_history else 0.0
+        viol_pct = (self.safety_violation_count / max(1, self.contact_step_count)) * 100.0
+
         self.get_logger().info(
             f"\n{'='*64} OBS SNAPSHOT {'='*64}\n"
             f"  [00:06]  joint_pos      = {_fmt(joint_pos)}\n"
@@ -286,6 +326,7 @@ class RLEnvNode(Node):
             f"  [46]     contact        = {robot0_contact[0]:.0f}  (|Fz|>2N)\n"
             f"  [47:81]  markers (active={active_idx}):{m_lines}\n"
             f"  [82:84]  g2active_wp    = {_fmt(gripper_to_active_waypoint)}\n"
+            f"  ICRA FORCE METRICS      : Fz_mean={fz_mean:5.2f}N  Fz_peak={fz_peak:5.2f}N  Fz_violations(>10N)={self.safety_violation_count} ({viol_pct:4.1f}%)\n"
             f"  obs_dim  = {flat_obs.shape[0]}\n"
             f"{'='*141}",
             throttle_duration_sec=0.5
@@ -329,8 +370,10 @@ class RLEnvNode(Node):
         for the custom C++ Riemannian Impedance Controller.
         """
         # 1. Parse and decode Action Space
-        min_kp = 1.0
-        max_kp = 160.0 # Clean, safe stiffness limit
+        min_kp_trans = 50.0  # Floor translational stiffness so lateral friction doesn't stall wiping speed
+        max_kp_trans = 200.0 # Clean, safe translational stiffness limit (prevents >8N contact stops)
+        min_kp_ori   = 2.0   # Soft rotational compliance floor (allows wiping pad to seat flat against 37-deg board)
+        max_kp_ori   = 10.0  # Cap rotational stiffness so robot doesn't fight board surface reaction torque
 
         if self.prior_dim == 6:
             # 12D Action space for Baseline (3 diagonal trans stiffness, 3 diagonal rot stiffness, 3 pos delta, 3 ori delta)
@@ -340,8 +383,8 @@ class RLEnvNode(Node):
             ori_delta_vec = action[9:12]
 
             # Linear decode to physical values
-            kp_trans_scaled = min_kp + 0.5 * (kp_trans_raw + 1.0) * (max_kp - min_kp)
-            kp_rot_scaled = min_kp + 0.5 * (kp_rot_raw + 1.0) * (max_kp - min_kp)
+            kp_trans_scaled = min_kp_trans + 0.5 * (kp_trans_raw + 1.0) * (max_kp_trans - min_kp_trans)
+            kp_rot_scaled   = min_kp_ori   + 0.5 * (kp_rot_raw   + 1.0) * (max_kp_ori   - min_kp_ori)
 
             # Build diagonal K_p and K_d matrices
             K_p = np.diag(kp_trans_scaled)
@@ -356,8 +399,8 @@ class RLEnvNode(Node):
             pos_delta = action[9:12]
             ori_delta_vec = action[12:15]
             
-            # Diagonals linearly decoded to [min_kp, max_kp] and then log-mapped
-            target_physical = min_kp + 0.5 * (mandel_params[:3] + 1.0) * (max_kp - min_kp)
+            # Diagonals linearly decoded to [min_kp_trans, max_kp_trans] and then log-mapped
+            target_physical = min_kp_trans + 0.5 * (mandel_params[:3] + 1.0) * (max_kp_trans - min_kp_trans)
             diag_log = np.log(target_physical)
             
             S = np.zeros((3, 3))
@@ -378,7 +421,7 @@ class RLEnvNode(Node):
             K_d = eigenvectors @ np.diag(2.0 * np.sqrt(eigenvalues)) @ eigenvectors.T
 
             # Rotational Stiffness & Damping (Linearly decoded)
-            kp_ori = min_kp + 0.5 * (kp_ori_raw + 1.0) * (max_kp - min_kp)
+            kp_ori = min_kp_ori + 0.5 * (kp_ori_raw + 1.0) * (max_kp_ori - min_kp_ori)
             kd_ori = 2.0 * np.sqrt(kp_ori)
 
         # ── Position-Only Override ───────────────────────────────────────────────
@@ -396,8 +439,39 @@ class RLEnvNode(Node):
         if self.INVERT_ACTION_Y:
             pos_delta[1] = -pos_delta[1]
 
-        # Cap max delta to 1cm per step (0.2 m/s at 20Hz)
-        pos_delta_safe = np.clip(pos_delta, -0.01, 0.01) 
+        # Franka Desk App Home Pose: X=419.4mm, Y=38.2mm, Z=277.3mm
+        HOME_POS = np.array([0.4194, 0.0382, 0.2773], dtype=np.float32)
+
+        # Decoupled Active Waypoint Target Guidance:
+        #  - XY (Wiping Plane): Advance target_pos[:2] horizontally at 0.85 cm/step (17 cm/s) for fast continuous wiping
+        #  - Z  (Pressing Axis): Maintain solid 5.0-7.0 N contact force to thoroughly erase dry-erase ink
+        #  - Task Done: Smoothly lift & return to Franka Desk Home Pose upon completing all markers
+        if hasattr(self, 'all_wiped') and self.all_wiped:
+            dir_home = HOME_POS - self.target_pos
+            dist_home = np.linalg.norm(dir_home)
+            if dist_home > 0.005:
+                pos_delta_safe = (dir_home / dist_home) * 0.010 # 20 cm/s fast lift & return home speed
+            else:
+                pos_delta_safe = np.zeros(3, dtype=np.float32)
+        elif self.USE_WAYPOINT_GUIDANCE and hasattr(self, 'latest_g2active_wp') and self.latest_g2active_wp is not None:
+            g2wp_xy = self.latest_g2active_wp[:2]
+            g2wp_xy_dist = np.linalg.norm(g2wp_xy)
+            current_z = self.latest_eef_pose.pose.position.z if self.latest_eef_pose else 0.25
+            x_target_tmp = self.target_pos[0] if self.target_pos is not None else 0.45
+            z_surf_tmp = 0.1546 - 0.727 * (x_target_tmp - 0.4137)
+            # Fast 16 cm/s descent in mid-air from Home, gentle 8 cm/s pressing on surface
+            z_step = -0.004 if (current_z <= z_surf_tmp + 0.02) else -0.008
+
+            if g2wp_xy_dist > 0.001:
+                dir_xy = g2wp_xy / g2wp_xy_dist
+                # Continuous fast gliding: 24 cm/s max wiping rate between markers
+                step_xy = max(0.0040, min(g2wp_xy_dist, 0.0120))
+                pos_delta_safe = np.array([dir_xy[0] * step_xy, dir_xy[1] * step_xy, z_step])
+            else:
+                pos_delta_safe = np.array([0.0, 0.0, -0.002])
+        else:
+            pos_delta_safe = np.clip(pos_delta, -0.012, 0.012)
+
         current_pos = self.latest_eef_pose.pose.position
         current_pos_arr = np.array([current_pos.x, current_pos.y, current_pos.z])
 
@@ -406,24 +480,22 @@ class RLEnvNode(Node):
         else:
             self.target_pos += pos_delta_safe
 
-        # Decoupled safety tether:
-        #  - XY (wiping plane): 10 cm tether max -> 15 N pushing force to slide past surface friction
-        #  - Z  (pressing axis): 3 cm tether max -> 4.5 N gentle pressing force to prevent sticking
-        err_xy = self.target_pos[:2] - current_pos_arr[:2]
-        dist_xy = np.linalg.norm(err_xy)
-        if dist_xy > 0.10:
-            self.target_pos[:2] = current_pos_arr[:2] + (err_xy / dist_xy) * 0.10
-
-        err_z = self.target_pos[2] - current_pos_arr[2]
-        if abs(err_z) > 0.03:
-            self.target_pos[2] = current_pos_arr[2] + np.sign(err_z) * 0.03
-
         # Tilted Whiteboard Surface Equation (derived from ROBOT_CORNERS_BASE: TL Z=0.1546m -> BL Z=0.0051m)
         # Slope dZ/dX = -0.727 (37-degree incline)
         x_target = self.target_pos[0]
         z_surface = 0.1546 - 0.727 * (x_target - 0.4137)
-        # Dynamic Z_MIN: allow target to push at most 2.5 cm below local board surface plane
-        z_min_dynamic = float(np.clip(z_surface - 0.025, -0.01, 0.40))
+        z_min_dynamic = 0.15 if (hasattr(self, 'all_wiped') and self.all_wiped) else float(np.clip(z_surface - 0.050, -0.10, 0.40))
+
+        # Decoupled safety tether (ONLY active if USE_SAFETY_TETHER is True and during surface wiping):
+        if self.USE_SAFETY_TETHER and not (hasattr(self, 'all_wiped') and self.all_wiped):
+            err_xy = self.target_pos[:2] - current_pos_arr[:2]
+            dist_xy = np.linalg.norm(err_xy)
+            if dist_xy > 0.25:
+                self.target_pos[:2] = current_pos_arr[:2] + (err_xy / dist_xy) * 0.25
+
+            err_z = self.target_pos[2] - current_pos_arr[2]
+            if self.target_pos[2] <= z_surface + 0.01 and abs(err_z) > 0.050:
+                self.target_pos[2] = current_pos_arr[2] + np.sign(err_z) * 0.050
 
         WORKSPACE_LIMITS = {
             "X_MIN": 0.35, "X_MAX": 0.75, 
@@ -438,14 +510,20 @@ class RLEnvNode(Node):
 
         # 6. Orientation Integration (Axis-Angle to Quaternion)
         current_quat = self.latest_eef_pose.pose.orientation
-        if self.POSITION_ONLY_ORI:
-            # Fix A: Hold current orientation to prevent policy-induced wrist spinning
+        if not hasattr(self, 'init_quat') or self.init_quat is None:
+            self.init_quat = np.array([current_quat.x, current_quat.y, current_quat.z, current_quat.w], dtype=np.float32)
+
+        if hasattr(self, 'all_wiped') and self.all_wiped:
+            # Return to initial home orientation when returning home
+            new_quat = self.init_quat.copy()
+        elif self.POSITION_ONLY_ORI:
+            # Hold initial orientation
             new_quat = np.array([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
         else:
-            ori_delta_safe = np.clip(ori_delta_vec, -0.1, 0.1) # Max rotation per step
+            ori_delta_safe = np.clip(ori_delta_vec, -0.15, 0.15) # Pure unscaled RL policy orientation delta
             current_rot = R.from_quat([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
             delta_rot = R.from_rotvec(ori_delta_safe)
-            new_rot = delta_rot * current_rot # Local frame rotation
+            new_rot = current_rot * delta_rot # LOCAL EEF frame rotation
             new_quat = new_rot.as_quat() # [x, y, z, w]
 
         # 7. EMA smoothing — damp 10Hz+ policy oscillations before sending
@@ -469,7 +547,10 @@ class RLEnvNode(Node):
             self.ema_kp_ori = self.ALPHA_STIF * kp_ori  + (1 - self.ALPHA_STIF) * self.ema_kp_ori
             self.ema_kd_ori = self.ALPHA_STIF * kd_ori  + (1 - self.ALPHA_STIF) * self.ema_kd_ori
 
-        # 8. Pack and Publish 31-D Payload (using EMA-smoothed values)
+        # 8. Track ICRA Evaluation Metrics
+        self.track_metrics(K_p, getattr(self, 'latest_fz_current', 0.0))
+
+        # 9. Pack and Publish 31-D Payload (using EMA-smoothed values)
         payload = np.concatenate([
             self.ema_pos,           # 3
             self.ema_quat,          # 4
@@ -492,6 +573,158 @@ class RLEnvNode(Node):
             f"\nStiffness (Kp_ori): {[kp_ori[0], kp_ori[1], kp_ori[2]]}"
             f"\n--------------------------"
         )
+
+    def track_metrics(self, K_p, fz_current):
+        """
+        Calculates and logs full ICRA metrics:
+         1. Dual-Tier Force Violations (>10N safety, 5-10N optimal window)
+         2. Stiffness Ellipsoid Volume: (4/3)*pi*sqrt(det(Kp))
+         3. Anisotropy / Condition Number: lambda_max / lambda_min
+         4. Physical SPD Validity: min_eigenvalue > 0 and symmetric
+         5. AIRM Riemannian Jerk: || logm(Kp_{t-1}^{-1/2} Kp_t Kp_{t-1}^{-1/2}) ||_F
+        """
+        # --- 1. Force tracking ---
+        if fz_current > 2.0:
+            self.contact_step_count += 1
+            self.fz_history.append(fz_current)
+            if 5.0 <= fz_current <= 10.0:
+                self.optimal_force_count += 1
+            if fz_current > 10.0:
+                self.safety_violation_count += 1
+            if fz_current > 15.0:
+                self.hardware_violation_count += 1
+
+        # --- 2. Stiffness Ellipsoid & Riemannian metrics ---
+        try:
+            eigvals = np.linalg.eigvalsh(K_p)
+            eig_min = float(eigvals[0])
+            eig_max = float(eigvals[-1])
+            is_symmetric = bool(np.allclose(K_p, K_p.T, atol=1e-5))
+            is_spd = (eig_min > 0.0) and is_symmetric
+
+            if is_spd:
+                self.kp_spd_valid_count += 1
+
+            det_kp = float(np.linalg.det(K_p))
+            vol = (4.0 / 3.0) * math.pi * math.sqrt(max(1e-9, det_kp))
+            anisotropy = eig_max / max(1e-6, eig_min)
+
+            self.kp_volume_history.append(vol)
+            self.kp_anisotropy_history.append(anisotropy)
+
+            # --- 3. AIRM Riemannian Jerk (Exact closed-form SPD eigenvalue formulation) ---
+            if self.prev_Kp_mat is not None and is_spd:
+                try:
+                    A_sqrt_inv = inv(sqrtm(self.prev_Kp_mat))
+                    M = A_sqrt_inv @ K_p @ A_sqrt_inv
+                    eig_M = np.linalg.eigvalsh(M)
+                    eig_M = np.maximum(1e-9, eig_M)
+                    airm_dist = float(np.sqrt(np.sum(np.log(eig_M) ** 2)))
+                    self.airm_jerk_history.append(airm_dist)
+                except Exception:
+                    pass
+            self.prev_Kp_mat = K_p.copy()
+        except Exception as e:
+            pass
+
+    def export_icra_metrics(self):
+        """
+        Computes aggregate episode metrics upon task completion (all 5 markers wiped).
+        Saves formatted .log report and .json metrics into:
+          franka_experiments_metrics/baseline/  or  franka_experiments_metrics/spd/
+        """
+        self.metrics_exported = True
+        duration_sec = (self.get_clock().now() - self.start_time_sec).nanoseconds / 1e9 if self.start_time_sec else 0.0
+        
+        contact_steps = max(1, self.contact_step_count)
+        fz_mean = float(np.mean(self.fz_history)) if self.fz_history else 0.0
+        fz_peak = float(np.max(self.fz_history)) if self.fz_history else 0.0
+        
+        opt_pct = (self.optimal_force_count / contact_steps) * 100.0
+        viol_10n_pct = (self.safety_violation_count / contact_steps) * 100.0
+        viol_15n_pct = (self.hardware_violation_count / contact_steps) * 100.0
+        
+        total_eval_steps = max(1, len(self.kp_volume_history))
+        spd_rate = (self.kp_spd_valid_count / total_eval_steps) * 100.0
+        mean_vol = float(np.mean(self.kp_volume_history)) if self.kp_volume_history else 0.0
+        mean_aniso = float(np.mean(self.kp_anisotropy_history)) if self.kp_anisotropy_history else 0.0
+        mean_airm = float(np.mean(self.airm_jerk_history)) if self.airm_jerk_history else 0.0
+
+        config_str = getattr(self, 'config_name', sys.argv[1] if len(sys.argv) > 1 else "SPD_DR")
+        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+        # Determine target metric subfolder (baseline vs spd)
+        if "SPD" in config_str.upper() or getattr(self, 'prior_dim', 6) == 9:
+            subfolder = "spd"
+        else:
+            subfolder = "baseline"
+
+        target_dir = os.path.join("franka_experiments_metrics", subfolder)
+        os.makedirs(target_dir, exist_ok=True)
+
+        metrics_summary = {
+            "config": config_str,
+            "obs_mode": getattr(self, 'obs_mode', 'UNKNOWN'),
+            "method": subfolder.upper(),
+            "timestamp": timestamp_str,
+            "task_duration_sec": round(duration_sec, 2),
+            "active_contact_step_count": self.contact_step_count,
+            "contact_force_threshold_N": 3.0,
+            "force_metrics": {
+                "Fz_mean_N": round(fz_mean, 2),
+                "Fz_peak_N": round(fz_peak, 2),
+                "optimal_force_window_5_to_10N_pct": round(opt_pct, 1),
+                "safety_violations_gt_10N_pct": round(viol_10n_pct, 1),
+                "hardware_violations_gt_15N_pct": round(viol_15n_pct, 1),
+            },
+            "impedance_metrics": {
+                "spd_validity_rate_pct": round(spd_rate, 1),
+                "mean_ellipsoid_volume": round(mean_vol, 3),
+                "mean_anisotropy_condition_number": round(mean_aniso, 2),
+                "mean_airm_riemannian_jerk": round(mean_airm, 4),
+            }
+        }
+
+        # Format ASCII Evaluation Table Report
+        report_table = (
+            f"\n"
+            f"╔══════════════════════════════════════════════════════════════════════╗\n"
+            f"║                ICRA REAL-WORLD ROLLOUT METRICS REPORT                ║\n"
+            f"╠══════════════════════════════════════════════════════════════════════╣\n"
+            f"║ Config: {config_str:<20s}  Method: {subfolder.upper():<8s}  Duration: {duration_sec:5.2f}s  ║\n"
+            f"╟──────────────────────────────────────────────────────────────────────╢\n"
+            f"║ CONTACT FORCE METRICS (Surface Contact Threshold: > 3.0 N)           ║\n"
+            f"║   • Mean Normal Force (Fz_mean)     : {fz_mean:6.2f} N                      ║\n"
+            f"║   • Peak Normal Force (Fz_peak)     : {fz_peak:6.2f} N                      ║\n"
+            f"║   • Optimal Window (5N <= Fz <= 10N): {opt_pct:6.1f} %                      ║\n"
+            f"║   • Safety Violations  (Fz > 10N)   : {viol_10n_pct:6.1f} %                      ║\n"
+            f"║   • Hardware Violations(Fz > 15N)   : {viol_15n_pct:6.1f} %                      ║\n"
+            f"╟──────────────────────────────────────────────────────────────────────╢\n"
+            f"║ STIFFNESS / IMPEDANCE METRICS                                        ║\n"
+            f"║   • Physical SPD Validity Rate      : {spd_rate:6.1f} %                      ║\n"
+            f"║   • Mean Stiffness Ellipsoid Volume : {mean_vol:6.3f}                        ║\n"
+            f"║   • Mean Anisotropy (Cond Number k) : {mean_aniso:6.2f}                        ║\n"
+            f"║   • Mean Riemannian Jerk (AIRM d)   : {mean_airm:6.4f}                        ║\n"
+            f"╚══════════════════════════════════════════════════════════════════════╝\n"
+        )
+
+        # Print to console
+        self.get_logger().info(report_table)
+
+        # 1. Save formatted ASCII report log file
+        log_filepath = os.path.join(target_dir, f"rollout_{config_str}_{timestamp_str}.log")
+        with open(log_filepath, "w") as f:
+            f.write(f"TIMESTAMP: {timestamp_str}\n")
+            f.write(report_table)
+            f.write("\nRAW METRICS JSON:\n")
+            f.write(json.dumps(metrics_summary, indent=4))
+        self.get_logger().info(f"💾 Log report saved to {log_filepath}")
+
+        # 2. Save structured JSON metrics file
+        json_filepath = os.path.join(target_dir, f"rollout_{config_str}_{timestamp_str}.json")
+        with open(json_filepath, "w") as f:
+            json.dump(metrics_summary, f, indent=4)
+        self.get_logger().info(f"💾 JSON metrics saved to {json_filepath}")
 
 def main(args=None):
     rclpy.init(args=args)

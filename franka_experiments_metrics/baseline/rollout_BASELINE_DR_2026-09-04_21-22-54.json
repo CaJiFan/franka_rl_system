@@ -1,0 +1,22 @@
+{
+    "config": "BASELINE_DR",
+    "obs_mode": "MULTI_MARKER_85D",
+    "method": "BASELINE",
+    "timestamp": "2026-09-04_21-22-54",
+    "task_duration_sec": 4.9,
+    "active_contact_step_count": 71,
+    "contact_force_threshold_N": 3.0,
+    "force_metrics": {
+        "Fz_mean_N": 17.45,
+        "Fz_peak_N": 18.58,
+        "optimal_force_window_5_to_10N_pct": 0.0,
+        "safety_violations_gt_10N_pct": 93.0,
+        "hardware_violations_gt_15N_pct": 93.0
+    },
+    "impedance_metrics": {
+        "spd_validity_rate_pct": 100.0,
+        "mean_ellipsoid_volume": 7915.572,
+        "mean_anisotropy_condition_number": 1.79,
+        "mean_airm_riemannian_jerk": 0.0475
+    }
+}

@@ -1,0 +1,22 @@
+{
+    "config": "SPD_DR",
+    "obs_mode": "MULTI_MARKER_85D",
+    "method": "SPD",
+    "timestamp": "2026-09-04_21-20-23",
+    "task_duration_sec": 25.05,
+    "active_contact_step_count": 412,
+    "contact_force_threshold_N": 3.0,
+    "force_metrics": {
+        "Fz_mean_N": 8.28,
+        "Fz_peak_N": 19.09,
+        "optimal_force_window_5_to_10N_pct": 31.8,
+        "safety_violations_gt_10N_pct": 36.7,
+        "hardware_violations_gt_15N_pct": 10.0
+    },
+    "impedance_metrics": {
+        "spd_validity_rate_pct": 100.0,
+        "mean_ellipsoid_volume": 6638.045,
+        "mean_anisotropy_condition_number": 1.62,
+        "mean_airm_riemannian_jerk": 0.0834
+    }
+}

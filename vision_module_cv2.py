@@ -487,8 +487,8 @@ class MarkerTracker:
       get_marker_states() — returns list of 5 zero-padded dicts.
     """
     MAX_MARKERS  = 5
-    WIPE_RATIO   = 0.20   # marker counted wiped when area < 20 % of start
-    SEARCH_R_PX  = 100    # pixel radius to re-detect each marker per frame
+    WIPE_RATIO   = 0.35   # marker counted wiped when area < 35 % of start
+    SEARCH_R_PX  = 25     # pixel radius (2.5 cm) to re-detect each marker per frame
 
     def __init__(self):
         self.markers: list[dict] = []  # {cx_px, cy_px, centroid_3d, start_area, current_area, wiped}
@@ -612,20 +612,62 @@ class MarkerTracker:
         for i, p in enumerate(positions):
             print(f"  M{i}: X={p[0]:+.3f}  Y={p[1]:+.3f}  Z={p[2]:+.3f}")
 
-    def update(self, mask_01):
-        """Re-measure each marker's area; advance active index when wiped."""
+    def update(self, mask_01, raw_mask_01=None, eef_pos_eraser=None, contact_active=False):
+        """Re-measure active marker's area; advance active index when wiped."""
         if not self.initialized:
             return
-        for m in self.markers:
+
+        # Contact & Proximity Validation Guard:
+        # A marker can ONLY transition to WIPED if the robot is physically near the surface
+        # (within 4.5 cm of local tilted board plane) or in active contact (|Fz| > 2N).
+        # This prevents camera line-of-sight occlusion by the Franka arm body from falsely triggering wipes in mid-air.
+        z_surface_local = 0.1546 - 0.727 * (eef_pos_eraser[0] - 0.4137) if eef_pos_eraser is not None else 0.05
+        near_surface = (
+            contact_active or 
+            (eef_pos_eraser is not None and abs(eef_pos_eraser[2] - z_surface_local) < 0.045)
+        )
+
+        # When near_surface is True (robot is physically touching/wiping board), use mask_01
+        # which incorporates the digital eraser mask to instantly validate the wipe under the felt pad.
+        # When near_surface is False (robot hovering in mid-air), use raw_mask_01 to prevent mid-air occlusion false-wipes.
+        eval_mask = mask_01 if near_surface else (raw_mask_01 if raw_mask_01 is not None else mask_01)
+
+        for i, m in enumerate(self.markers):
             if m["wiped"]:
                 m["current_area"] = 0.0
                 continue
-            area = self._area_in_neighborhood(mask_01, m["cx_px"], m["cy_px"])
+
+            # Sequential Lock: ONLY evaluate wiping for the CURRENT active marker (or earlier).
+            # Prevents adjacent future markers (M3, M4) from being prematurely marked as wiped
+            # when the 90px eraser mask overlaps them while wiping M2!
+            if i > self.active_idx:
+                continue
+
+            area = self._area_in_neighborhood(eval_mask, m["cx_px"], m["cy_px"])
             m["current_area"] = area
-            if m["start_area"] > 0 and area < m["start_area"] * self.WIPE_RATIO:
+
+            # Wiping Trigger:
+            # 1. Normal ink wiping: area < start_area * 35%
+            # 2. Blank spot fallback: if a marker was placed on a blank/low-ink area (start_area < 30 px),
+            #    immediately mark it as wiped upon robot arrival (near_surface == True).
+            is_wiped = (
+                (m["start_area"] >= 30.0 and area < m["start_area"] * self.WIPE_RATIO) or
+                (m["start_area"] < 30.0)
+            )
+            if near_surface and is_wiped:
                 m["wiped"] = True
-                print(f"[MARKER] M{self.markers.index(m)} wiped! "
-                      f"({area:.0f} px < {m['start_area'] * self.WIPE_RATIO:.0f} px threshold)")
+                print(f"[MARKER] M{i} wiped! (area={area:.0f} px, start_area={m['start_area']:.0f} px)")
+
+    def force_wipe_active(self):
+        """Manually mark the current active marker as wiped (triggered by 'N' key press)."""
+        idx = self.active_idx
+        if idx < len(self.markers):
+            self.markers[idx]["wiped"] = True
+            nxt = f"M{idx+1}" if idx + 1 < len(self.markers) else "ALL DONE"
+            print(f"\n[MANUAL OVERRIDE] Manually marked M{idx} as WIPED! Advancing to {nxt}...")
+            return True
+        print(f"\n[MANUAL OVERRIDE] All markers already wiped!")
+        return False
 
     def get_marker_states(self) -> list:
         """Returns exactly 5 dicts (zero-padded). Used by VisionState.set_marker_states."""
@@ -810,9 +852,22 @@ def run_vision_loop(half_frame=False, cam_index=0):
             )
             locked_target_px = ink_obs["centroid_px"]
 
+            raw_mask_01 = segment_ink(
+                bgr,
+                board_mask=create_board_mask(calibrator.corners_px, bgr.shape),
+                otsu_offset=otsu_offset,
+                min_area=min_area,
+                max_area=max_area,
+                close_rad=close_rad,
+            )
+
             # ── Update marker tracker each frame ─────────────────────────────
             if task_started and marker_tracker.initialized:
-                marker_tracker.update(mask_01)
+                marker_tracker.update(
+                    mask_01, 
+                    raw_mask_01=raw_mask_01,
+                    eef_pos_eraser=eef_pos_eraser if 'eef_pos_eraser' in locals() else None
+                )
 
             # Push per-marker states to shared VisionState for ROS publishing
             vision_state.set_marker_states(marker_tracker.get_marker_states())
@@ -929,7 +984,7 @@ def run_vision_loop(half_frame=False, cam_index=0):
                 f"Markers: {marker_hud}",
                 f"Active:  {act_pos} m  |  Wiped: {marker_tracker.proportion_wiped*100:5.1f}%",
                 f"Total Ink Area: {ink_obs['ink_area_px']:.0f} px  ({'TASK RUNNING' if task_started else 'press T to start'})",
-                f"Camera: OpenCV Generic",
+                f"Camera: OpenCV Generic  [Controls: T=Start | N=Skip Marker | R=Reset]",
                 f"--- Trackbars ---",
                 f"Otsu Offset: {otsu_offset} | Min Area: {min_area} px2 | Max Area: {max_area} px2 | Close Rad: {close_rad}",
             ]
@@ -985,6 +1040,8 @@ def run_vision_loop(half_frame=False, cam_index=0):
                 task_started = True
                 mode = "manual" if manual else "auto"
                 print(f"\n[VIS] TASK STARTED ({mode}). {len(marker_tracker.markers)} marker(s).")
+            elif key in (ord('n'), ord('N')):
+                marker_tracker.force_wipe_active()
             elif key == ord('s'):
                 calibrator.save()
             elif key == ord('l'):
