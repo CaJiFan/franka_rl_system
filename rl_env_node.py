@@ -470,7 +470,8 @@ class RLEnvNode(Node):
             else:
                 pos_delta_safe = np.array([0.0, 0.0, -0.002])
         else:
-            pos_delta_safe = np.clip(pos_delta, -0.012, 0.012)
+            MAX_DELTA = 0.005
+            pos_delta_safe = np.clip(pos_delta, -MAX_DELTA, MAX_DELTA)
 
         current_pos = self.latest_eef_pose.pose.position
         current_pos_arr = np.array([current_pos.x, current_pos.y, current_pos.z])
@@ -484,7 +485,9 @@ class RLEnvNode(Node):
         # Slope dZ/dX = -0.727 (37-degree incline)
         x_target = self.target_pos[0]
         z_surface = 0.1546 - 0.727 * (x_target - 0.4137)
-        z_min_dynamic = 0.15 if (hasattr(self, 'all_wiped') and self.all_wiped) else float(np.clip(z_surface - 0.050, -0.10, 0.40))
+        DELTA_MAX_METERS = 0.025
+        # Dynamic Z boundary: limit max penetration below board surface to 2.5 cm (0.025 m)
+        z_min_dynamic = 0.15 if (hasattr(self, 'all_wiped') and self.all_wiped) else float(np.clip(z_surface - DELTA_MAX_METERS, -0.10, 0.40))
 
         # Decoupled safety tether (ONLY active if USE_SAFETY_TETHER is True and during surface wiping):
         if self.USE_SAFETY_TETHER and not (hasattr(self, 'all_wiped') and self.all_wiped):
@@ -494,8 +497,8 @@ class RLEnvNode(Node):
                 self.target_pos[:2] = current_pos_arr[:2] + (err_xy / dist_xy) * 0.25
 
             err_z = self.target_pos[2] - current_pos_arr[2]
-            if self.target_pos[2] <= z_surface + 0.01 and abs(err_z) > 0.050:
-                self.target_pos[2] = current_pos_arr[2] + np.sign(err_z) * 0.050
+            if self.target_pos[2] <= z_surface + 0.01 and abs(err_z) > DELTA_MAX_METERS:
+                self.target_pos[2] = current_pos_arr[2] + np.sign(err_z) * DELTA_MAX_METERS
 
         WORKSPACE_LIMITS = {
             "X_MIN": 0.35, "X_MAX": 0.75, 
