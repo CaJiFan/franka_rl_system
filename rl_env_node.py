@@ -18,6 +18,8 @@ from scipy.spatial.transform import Rotation as R
 from scipy.linalg import expm, logm, sqrtm, inv
 import os
 import sys
+import threading
+import atexit
 
 try:
     from stable_baselines3 import SAC
@@ -49,13 +51,16 @@ GRIP_SITE_OFFSET = np.array([0.7018, -0.0067, 0.0865, 0.7071], dtype=np.float32)
 # Slots 82-84: gripper_to_active_waypoint (3)
 
 class RLEnvNode(Node):
-    def __init__(self):
+    def __init__(self, args):
         super().__init__('rl_env_node')
-        
+        self.args = args
+        self.config = args.config
+        print(args)
         # --- Execution Mode ---
         # Set to True to send observations to a remote ZMQ server.
         # Set to False to load the model and run inference locally on this machine.
-        self.use_zmq = False 
+        self.use_zmq = self.args.use_zmq 
+        print("use_zmq", self.use_zmq)
         # TCP offset: flange center -> wiping contact surface (bottom face of tool)
         # Tool: 12x5x3 cm printed wiping pad  ->  contact at Z = 0.030 m from flange
         # Keep in sync with tcp_offset in record_corners.py !
@@ -65,20 +70,20 @@ class RLEnvNode(Node):
         # Set True to ignore policy stiffness and use a fixed Kp=150 N/m diagonal
         # (critical damping applied automatically). Useful for isolating whether
         # position tracking is correct before trusting the learned stiffness.
-        self.POSITION_ONLY_MODE = False
+        self.POSITION_ONLY_MODE = self.args.pos_only
         self.FIXED_KP  = 150.0   # N/m  (translational)
         self.FIXED_KP_ORI = 5.0  # N·m/rad (rotational compliance: allows wiping pad to lay 100% flat on tilted board)
 
         # Fix A: Hold current orientation and ignore policy orientation commands to eliminate wrist spin
-        self.POSITION_ONLY_ORI = False
+        self.POSITION_ONLY_ORI = self.args.ori_only
 
         # Set True to use waypoint guidance for smooth continuous real-robot demos.
         # Set False for 100% pure unassisted RL policy action execution (raw SAC deltas).
-        self.USE_WAYPOINT_GUIDANCE = False
+        self.USE_WAYPOINT_GUIDANCE = self.args.use_guidance
 
         # Set True to cap tracking error (tether) relative to current robot position.
         # Set False to disable the tether completely for unconstrained spatial tracking.
-        self.USE_SAFETY_TETHER = False
+        self.USE_SAFETY_TETHER = self.args.use_safety_tether
 
         # Action mapping flags: set True if policy action Y is inverted relative to robot frame
         self.INVERT_ACTION_Y = False
@@ -97,7 +102,7 @@ class RLEnvNode(Node):
             BASE_PATH = "checkpoints"
             ALGO="SAC"
             ENV="WIPE_ICRA"
-            CONFIG=sys.argv[1]
+            CONFIG=self.config
             self.model_path = os.path.join(BASE_PATH, f'{ALGO}_{ENV}_{CONFIG}' ,"best_model") # Update with your actual checkpoint path!
             self.get_logger().info(f"Loading SAC policy from {self.model_path} onto CPU...")
             try:
@@ -393,10 +398,10 @@ class RLEnvNode(Node):
         for the custom C++ Riemannian Impedance Controller.
         """
         # 1. Parse and decode Action Space
-        min_kp_trans = 10.0  # Floor translational stiffness so lateral friction doesn't stall wiping speed
+        min_kp_trans = 1.0  # Floor translational stiffness so lateral friction doesn't stall wiping speed
         max_kp_trans = 300.0 # Clean, safe translational stiffness limit (prevents >8N contact stops)
-        min_kp_ori   = 2.0   # Soft rotational compliance floor (allows wiping pad to seat flat against 37-deg board)
-        max_kp_ori   = 100.0  # Cap rotational stiffness so robot doesn't fight board surface reaction torque
+        min_kp_ori   = 1.0   # Soft rotational compliance floor (allows wiping pad to seat flat against 37-deg board)
+        max_kp_ori   = 10.0  # Cap rotational stiffness so robot doesn't fight board surface reaction torque
 
         if self.prior_dim == 6:
             # 12D Action space for Baseline (3 diagonal trans stiffness, 3 diagonal rot stiffness, 3 pos delta, 3 ori delta)
@@ -711,7 +716,7 @@ class RLEnvNode(Node):
         mean_aniso = float(np.mean(self.kp_anisotropy_history)) if self.kp_anisotropy_history else 0.0
         mean_airm = float(np.mean(self.airm_jerk_history)) if self.airm_jerk_history else 0.0
 
-        config_str = getattr(self, 'config_name', sys.argv[1] if len(sys.argv) > 1 else "SPD_DR")
+        config_str = self.config
         timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
         # Determine target metric subfolder (baseline vs spd)
@@ -787,9 +792,107 @@ class RLEnvNode(Node):
             json.dump(metrics_summary, f, indent=4)
         self.get_logger().info(f"💾 JSON metrics saved to {json_filepath}")
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = RLEnvNode()
+class DualOutputLogger:
+    """
+    Duplicates both Python stdout/stderr and C-level ROS2 stdout/stderr
+    to a dedicated log file while preserving real-time terminal output.
+    """
+    def __init__(self, log_filepath):
+        self.log_filepath = log_filepath
+        os.makedirs(os.path.dirname(os.path.abspath(log_filepath)), exist_ok=True)
+        self.log_file = open(log_filepath, "a", encoding="utf-8")
+        
+        self.stdout_fd = sys.stdout.fileno()
+        self.stderr_fd = sys.stderr.fileno()
+        
+        self.orig_stdout = os.dup(self.stdout_fd)
+        self.orig_stderr = os.dup(self.stderr_fd)
+        
+        self.pipe_r, self.pipe_w = os.pipe()
+        
+        os.dup2(self.pipe_w, self.stdout_fd)
+        os.dup2(self.pipe_w, self.stderr_fd)
+        
+        self.running = True
+        self.closed = False
+        self.thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.thread.start()
+
+    def _reader_loop(self):
+        while self.running:
+            try:
+                data = os.read(self.pipe_r, 4096)
+                if not data:
+                    break
+                os.write(self.orig_stdout, data)
+                self.log_file.write(data.decode("utf-8", errors="replace"))
+                self.log_file.flush()
+            except Exception:
+                break
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.running = False
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            os.dup2(self.orig_stdout, self.stdout_fd)
+            os.dup2(self.orig_stderr, self.stderr_fd)
+            os.close(self.orig_stdout)
+            os.close(self.orig_stderr)
+            os.close(self.pipe_w)
+            os.close(self.pipe_r)
+        except Exception:
+            pass
+        try:
+            self.log_file.close()
+        except Exception:
+            pass
+
+def main(parsed_args=None):
+    if parsed_args is None:
+        import argparse
+        parser = argparse.ArgumentParser(description="Evaluate RL Policy on Real Robot.")
+        parser.add_argument("--use_zmq", action="store_true",
+                            help="Use ZeroMQ to send observations to a remote RL server.", default=False)
+        parser.add_argument("--pos_only", action="store_true",
+                            help="Fix stiffness to diagonal Kp=150, ignore policy orientation.", default=False)
+        parser.add_argument("--ori_only", action="store_true",
+                            help="Fix orientation, ignore policy orientation commands.", default=False)
+        parser.add_argument("--use_guidance", action="store_true",
+                            help="Use waypoint guidance for smooth continuous real-robot demos.", default=False)
+        parser.add_argument("--use_safety_tether", action="store_true",
+                            help="Use safety tether to cap tracking error relative to current robot position.", default=False)
+        parser.add_argument('--config', type=str, default="SPD_DR",
+                            help="Configuration string (e.g., 'SPD_DR', 'BASELINE_DR', 'SPD_TR', etc.)",
+                            choices=["SPD_DR", "BASELINE_DR", "FIXED", "FIXED_DR", "SPD", "BASELINE"])
+        parser.add_argument('--log_file', type=str, default=None,
+                            help="Custom file path to log all console output. Defaults to Log/<config>_<timestamp>.log")
+        parser.add_argument('--no_log_file', action="store_true", default=False,
+                            help="Disable automatic file logging.")
+        parsed_args = parser.parse_args()
+
+    # Automatic dual output logging (terminal + dedicated file)
+    logger = None
+    if not getattr(parsed_args, 'no_log_file', False):
+        custom_log = getattr(parsed_args, 'log_file', None)
+        config_name = getattr(parsed_args, 'config', 'SPD_DR')
+        if custom_log:
+            log_filepath = custom_log
+        else:
+            timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            log_filepath = os.path.join("Log", f"{config_name}_{timestamp_str}.log")
+        logger = DualOutputLogger(log_filepath)
+        atexit.register(logger.close)
+        print(f"📄 [LOGGING] Session output will be recorded to: {log_filepath}")
+
+    rclpy.init()
+    node = RLEnvNode(parsed_args)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -797,6 +900,10 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+        if logger is not None:
+            logger.close()
 
 if __name__ == '__main__':
     main()
+
+
