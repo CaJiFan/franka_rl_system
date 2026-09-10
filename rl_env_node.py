@@ -74,7 +74,7 @@ class RLEnvNode(Node):
 
         # Set True to use waypoint guidance for smooth continuous real-robot demos.
         # Set False for 100% pure unassisted RL policy action execution (raw SAC deltas).
-        self.USE_WAYPOINT_GUIDANCE = True
+        self.USE_WAYPOINT_GUIDANCE = False
 
         # Set True to cap tracking error (tether) relative to current robot position.
         # Set False to disable the tether completely for unconstrained spatial tracking.
@@ -152,8 +152,9 @@ class RLEnvNode(Node):
         self.ema_kp_ori = None   # np.ndarray(3,)
         self.ema_kd_ori = None   # np.ndarray(3,)
 
-        # Integrated position target (accumulates delta to overcome static joint friction)
+        # Integrated position and orientation targets (accumulate delta to overcome friction/inertia)
         self.target_pos = None
+        self.target_rot = None
         self.prev_active_idx = None
 
         # ── ICRA Evaluation & Metric Logging State ───────────────────────────
@@ -170,6 +171,10 @@ class RLEnvNode(Node):
         self.start_time_sec = None
         self.latest_fz_current = 0.0
         self.metrics_exported = False
+
+        # Force Tare Calibration state (calibrates mid-air baseline at startup)
+        self.fz_tare_samples = []
+        self.fz_baseline = None
 
         # --- Subscribers ---
         self.create_subscription(JointState,     '/joint_states',                                                        self.joint_cb,   10)
@@ -233,13 +238,31 @@ class RLEnvNode(Node):
         # TCP (eraser tip) position
         eef_pos_eraser = eef_pos + r_eef.apply(self.tcp_offset)
 
-        # ── Contact & F/T ────────────────────────────────────────────────────
+        # ── Contact & F/T (with Auto-Tare Baseline Subtraction) ───────────────
         force  = self.latest_wrench.wrench.force
         robot0_contact_force = np.array([force.x, force.y, force.z], dtype=np.float32)
-        fz_current = float(abs(robot0_contact_force[2]))
-        self.latest_fz_current = fz_current
+        fz_signed = float(robot0_contact_force[2])
+
+        # Auto-tare calibration: collect 25 samples (1.25s) in air at startup
+        if self.fz_baseline is None:
+            self.fz_tare_samples.append(fz_signed)
+            if len(self.fz_tare_samples) >= 25:
+                self.fz_baseline = float(np.mean(self.fz_tare_samples))
+                self.get_logger().info(
+                    f"✅ [AUTO-TARE COMPLETE] Mid-air baseline calibrated: Fz_tare = {self.fz_baseline:.2f} N"
+                )
+            else:
+                self.get_logger().info(
+                    f"⏳ [AUTO-TARE] Calibrating force sensor in air... ({len(self.fz_tare_samples)}/25)",
+                    throttle_duration_sec=0.5
+                )
+                return  # Hold startup until baseline is calibrated
+
+        # Net interaction force after subtracting mid-air baseline
+        fz_net = float(abs(fz_signed - self.fz_baseline))
+        self.latest_fz_current = fz_net
         robot0_contact = np.array(
-            [1.0 if fz_current > 2.0 else 0.0], dtype=np.float32
+            [1.0 if fz_net > 2.0 else 0.0], dtype=np.float32
         )
 
         # ── Vision: marker states from /wipe_markers (20 floats) ─────────────
@@ -323,7 +346,7 @@ class RLEnvNode(Node):
             f"  [35:37]  eef_pos(TCP)   = {_fmt(eef_pos_eraser)}  (eraser tip)\n"
             f"  [38:41]  eef_quat       = {_fmt(eef_quat)}  (flange xyzw)\n"
             f"  [42:45]  eef_quat_site  = {_fmt(eef_quat_site)}  (grip-site xyzw)\n"
-            f"  [46]     contact        = {robot0_contact[0]:.0f}  (|Fz|>2N)\n"
+            f"  [46]     contact        = {robot0_contact[0]:.0f}  (|Fz_net|>2N, net={fz_net:.2f}N, raw={fz_signed:.2f}N, tare={self.fz_baseline:.2f}N)\n"
             f"  [47:81]  markers (active={active_idx}):{m_lines}\n"
             f"  [82:84]  g2active_wp    = {_fmt(gripper_to_active_waypoint)}\n"
             f"  ICRA FORCE METRICS      : Fz_mean={fz_mean:5.2f}N  Fz_peak={fz_peak:5.2f}N  Fz_violations(>10N)={self.safety_violation_count} ({viol_pct:4.1f}%)\n"
@@ -370,10 +393,10 @@ class RLEnvNode(Node):
         for the custom C++ Riemannian Impedance Controller.
         """
         # 1. Parse and decode Action Space
-        min_kp_trans = 50.0  # Floor translational stiffness so lateral friction doesn't stall wiping speed
-        max_kp_trans = 200.0 # Clean, safe translational stiffness limit (prevents >8N contact stops)
+        min_kp_trans = 10.0  # Floor translational stiffness so lateral friction doesn't stall wiping speed
+        max_kp_trans = 300.0 # Clean, safe translational stiffness limit (prevents >8N contact stops)
         min_kp_ori   = 2.0   # Soft rotational compliance floor (allows wiping pad to seat flat against 37-deg board)
-        max_kp_ori   = 10.0  # Cap rotational stiffness so robot doesn't fight board surface reaction torque
+        max_kp_ori   = 100.0  # Cap rotational stiffness so robot doesn't fight board surface reaction torque
 
         if self.prior_dim == 6:
             # 12D Action space for Baseline (3 diagonal trans stiffness, 3 diagonal rot stiffness, 3 pos delta, 3 ori delta)
@@ -471,7 +494,7 @@ class RLEnvNode(Node):
                 pos_delta_safe = np.array([0.0, 0.0, -0.002])
         else:
             MAX_DELTA = 0.005
-            pos_delta_safe = np.clip(pos_delta, -MAX_DELTA, MAX_DELTA)
+            pos_delta_safe = np.clip(pos_delta * 0.005, -MAX_DELTA, MAX_DELTA)
 
         current_pos = self.latest_eef_pose.pose.position
         current_pos_arr = np.array([current_pos.x, current_pos.y, current_pos.z])
@@ -511,23 +534,57 @@ class RLEnvNode(Node):
 
         new_pos = self.target_pos.copy()
 
-        # 6. Orientation Integration (Axis-Angle to Quaternion)
+        # 6. Orientation Integration (Persistent Accumulator with Safety Tilt Clamping)
         current_quat = self.latest_eef_pose.pose.orientation
+        current_rot = R.from_quat([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
         if not hasattr(self, 'init_quat') or self.init_quat is None:
             self.init_quat = np.array([current_quat.x, current_quat.y, current_quat.z, current_quat.w], dtype=np.float32)
 
+        if self.target_rot is None:
+            self.target_rot = current_rot
+
+        tilt_angle_deg = 0.0
         if hasattr(self, 'all_wiped') and self.all_wiped:
             # Return to initial home orientation when returning home
+            self.target_rot = R.from_quat(self.init_quat)
             new_quat = self.init_quat.copy()
         elif self.POSITION_ONLY_ORI:
             # Hold initial orientation
+            self.target_rot = current_rot
             new_quat = np.array([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
         else:
-            ori_delta_safe = np.clip(ori_delta_vec, -0.15, 0.15) # Pure unscaled RL policy orientation delta
-            current_rot = R.from_quat([current_quat.x, current_quat.y, current_quat.z, current_quat.w])
+            # 1. Continuous scaling of policy output [-1, 1] to physical rotation step (rad/step)
+            # 0.04 rad/step (~2.3 deg/step) at 20Hz allows up to 0.8 rad/s (~46 deg/s) angular velocity
+            ORI_SCALE = 0.04
+            MAX_ORI_DELTA = 0.06 # ~3.4 deg max single-step delta
+            ori_delta_safe = np.clip(ori_delta_vec * ORI_SCALE, -MAX_ORI_DELTA, MAX_ORI_DELTA)
+
+            # 2. Base frame delta rotation (pre-multiplication matches Robosuite OSC convention)
             delta_rot = R.from_rotvec(ori_delta_safe)
-            new_rot = current_rot * delta_rot # LOCAL EEF frame rotation
-            new_quat = new_rot.as_quat() # [x, y, z, w]
+            self.target_rot = delta_rot * self.target_rot
+
+            # 3. Orientation Safety Clamping: limit maximum tilt angle from nominal surface normal (init_quat)
+            # Prevents wrist flip or exceeding Franka joint limits on tilted board
+            r_init = R.from_quat(self.init_quat)
+            r_rel_init = self.target_rot * r_init.inv()
+            tilt_angle = r_rel_init.magnitude()
+            MAX_TILT_RAD = 0.44 # 25.2 degrees max allowable cone of tilt
+            if tilt_angle > MAX_TILT_RAD:
+                rotvec_clamped = r_rel_init.as_rotvec() * (MAX_TILT_RAD / tilt_angle)
+                self.target_rot = R.from_rotvec(rotvec_clamped) * r_init
+                tilt_angle = MAX_TILT_RAD
+            tilt_angle_deg = math.degrees(tilt_angle)
+
+            # 4. Decoupled safety tether (lead-angle limiter relative to live physical pose)
+            if self.USE_SAFETY_TETHER and not (hasattr(self, 'all_wiped') and self.all_wiped):
+                r_rel_live = self.target_rot * current_rot.inv()
+                live_lead_angle = r_rel_live.magnitude()
+                MAX_LEAD_RAD = 0.35 # 20 degrees max lead angle over physical wrist
+                if live_lead_angle > MAX_LEAD_RAD:
+                    rotvec_live_clamped = r_rel_live.as_rotvec() * (MAX_LEAD_RAD / live_lead_angle)
+                    self.target_rot = R.from_rotvec(rotvec_live_clamped) * current_rot
+
+            new_quat = self.target_rot.as_quat().astype(np.float64)
 
         # 7. EMA smoothing — damp 10Hz+ policy oscillations before sending
         if self.ema_pos is None:
@@ -572,6 +629,7 @@ class RLEnvNode(Node):
             f"\nRaw delta pos: {pos_delta}"
             f"\nSafe target pos: {new_pos}"
             f"\nTarget orientation (quat): {new_quat}"
+            f"\nTarget tilt angle from normal: {tilt_angle_deg:.2f} deg"
             f"\nStiffness (Kp_pos diag): {[K_p[0,0], K_p[1,1], K_p[2,2]]}"
             f"\nStiffness (Kp_ori): {[kp_ori[0], kp_ori[1], kp_ori[2]]}"
             f"\n--------------------------"

@@ -55,6 +55,15 @@ controller_interface::CallbackReturn RiemannianImpedanceController::on_configure
   K_p_ori_.setOnes(); K_p_ori_ *= 10.0;
   K_d_ori_.setOnes(); K_d_ori_ *= 2.0 * std::sqrt(10.0);
 
+  ImpedanceCommand default_cmd;
+  default_cmd.position = position_d_;
+  default_cmd.orientation = orientation_d_;
+  default_cmd.K_p_pos = K_p_pos_;
+  default_cmd.K_d_pos = K_d_pos_;
+  default_cmd.K_p_ori = K_p_ori_;
+  default_cmd.K_d_ori = K_d_ori_;
+  cmd_buffer_.initRT(default_cmd);
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -63,20 +72,25 @@ void RiemannianImpedanceController::payloadCallback(const std_msgs::msg::Float64
     RCLCPP_ERROR(get_node()->get_logger(), "Expected 31 floats in payload, got %zu", msg->data.size());
     return;
   }
+
+  ImpedanceCommand cmd;
   // 3 pos
-  position_d_ << msg->data[0], msg->data[1], msg->data[2];
+  cmd.position << msg->data[0], msg->data[1], msg->data[2];
   // 4 quat (x, y, z, w)
-  orientation_d_.coeffs() << msg->data[3], msg->data[4], msg->data[5], msg->data[6];
+  cmd.orientation.coeffs() << msg->data[3], msg->data[4], msg->data[5], msg->data[6];
   
   // 9 Kp_pos (Flattened row-major from Python)
-  K_p_pos_ = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(&msg->data[7]);
+  cmd.K_p_pos = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(&msg->data[7]);
   // 9 Kd_pos
-  K_d_pos_ = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(&msg->data[16]);
+  cmd.K_d_pos = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(&msg->data[16]);
   
   // 3 Kp_ori
-  K_p_ori_ << msg->data[25], msg->data[26], msg->data[27];
+  cmd.K_p_ori << msg->data[25], msg->data[26], msg->data[27];
   // 3 Kd_ori
-  K_d_ori_ << msg->data[28], msg->data[29], msg->data[30];
+  cmd.K_d_ori << msg->data[28], msg->data[29], msg->data[30];
+
+  // Write atomically into lock-free real-time buffer
+  cmd_buffer_.writeFromNonRT(cmd);
 
   // Dead-man's switch: record time of last valid command
   last_cmd_time_ = get_node()->get_clock()->now();
@@ -97,6 +111,18 @@ controller_interface::CallbackReturn RiemannianImpedanceController::on_activate(
   position_d_ = initial_transform.translation();
   orientation_d_ = Eigen::Quaterniond(initial_transform.rotation());
   
+  ImpedanceCommand init_cmd;
+  init_cmd.position = position_d_;
+  init_cmd.orientation = orientation_d_;
+  init_cmd.K_p_pos = K_p_pos_;
+  init_cmd.K_d_pos = K_d_pos_;
+  init_cmd.K_p_ori = K_p_ori_;
+  init_cmd.K_d_ori = K_d_ori_;
+  cmd_buffer_.initRT(init_cmd);
+
+  tau_prev_.setZero();
+  cmd_received_ = false;
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -109,9 +135,7 @@ controller_interface::CallbackReturn RiemannianImpedanceController::on_deactivat
 controller_interface::return_type RiemannianImpedanceController::update(
     const rclcpp::Time& time, const rclcpp::Duration& /*period*/) {
 
-  // ── Dead-man's switch ────────────────────────────────────────────────────
-  // If the RL publisher dies (Ctrl+C), freeze target at current robot pose
-  // to prevent continued tracking of a stale oscillating target.
+  // ── Command Reading & Dead-man's switch ──────────────────────────────────
   if (cmd_received_) {
     double elapsed = (time - last_cmd_time_).seconds();
     if (elapsed > CMD_TIMEOUT_SEC) {
@@ -123,6 +147,15 @@ controller_interface::return_type RiemannianImpedanceController::update(
       // Log once per second at most
       RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
           "[RiemannianImpedanceController] No cmd for %.2f s — holding current pose.", elapsed);
+    } else {
+      // Normal execution: read latest atomic command from lock-free buffer
+      const auto& cmd = *cmd_buffer_.readFromRT();
+      position_d_    = cmd.position;
+      orientation_d_ = cmd.orientation;
+      K_p_pos_       = cmd.K_p_pos;
+      K_d_pos_       = cmd.K_d_pos;
+      K_p_ori_       = cmd.K_p_ori;
+      K_d_ori_       = cmd.K_d_ori;
     }
   }
 
@@ -147,7 +180,7 @@ controller_interface::return_type RiemannianImpedanceController::update(
     orientation.coeffs() << -orientation.coeffs();
   }
   Eigen::Quaterniond error_quaternion(orientation.inverse() * orientation_d_);
-  error_ori = error_quaternion.vec(); 
+  error_ori = 2.0 * error_quaternion.vec(); 
   error_ori = transform.rotation() * error_ori; // Transform error to base frame
 
   // Velocity error
@@ -168,9 +201,17 @@ controller_interface::return_type RiemannianImpedanceController::update(
   // Compute joint torques
   Vector7d tau_cmd = jacobian.transpose() * wrench_cmd;
 
+  const double MAX_DELTA_TAU = 1.0; // max 1 Nm per ms tick
+  const std::array<double, 7> k_tau_max = {80.0, 80.0, 80.0, 80.0, 11.0, 11.0, 11.0};
   for (size_t i = 0; i < 7; ++i) {
+    tau_cmd(i) = std::clamp(tau_cmd(i), -k_tau_max[i], k_tau_max[i]);
+    double delta = tau_cmd(i) - tau_prev_(i);
+    delta = std::clamp(delta, -MAX_DELTA_TAU, MAX_DELTA_TAU);
+    tau_cmd(i) = tau_prev_(i) + delta;
+    tau_prev_(i) = tau_cmd(i);
     command_interfaces_[i].set_value(tau_cmd(i));
   }
+
   
   return controller_interface::return_type::OK;
 }

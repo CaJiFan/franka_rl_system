@@ -11,8 +11,18 @@
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Dense>
+#include <realtime_tools/realtime_buffer.hpp>
 
 namespace franka_example_controllers {
+
+struct ImpedanceCommand {
+  Eigen::Vector3d position{Eigen::Vector3d::Zero()};
+  Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()};
+  Eigen::Matrix3d K_p_pos{Eigen::Matrix3d::Identity() * 100.0};
+  Eigen::Matrix3d K_d_pos{Eigen::Matrix3d::Identity() * 20.0};
+  Eigen::Vector3d K_p_ori{Eigen::Vector3d::Constant(10.0)};
+  Eigen::Vector3d K_d_ori{Eigen::Vector3d::Constant(6.32)};
+};
 
 class RiemannianImpedanceController : public controller_interface::ControllerInterface {
  public:
@@ -33,6 +43,9 @@ class RiemannianImpedanceController : public controller_interface::ControllerInt
   // Fat Payload Subscription
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_impedance_cmd_;
   
+  // Real-Time Safe Lock-Free Command Buffer
+  realtime_tools::RealtimeBuffer<ImpedanceCommand> cmd_buffer_;
+
   // State
   Eigen::Vector3d position_d_;
   Eigen::Quaterniond orientation_d_;
@@ -40,6 +53,9 @@ class RiemannianImpedanceController : public controller_interface::ControllerInt
   Eigen::Matrix3d K_d_pos_;
   Eigen::Vector3d K_p_ori_;
   Eigen::Vector3d K_d_ori_;
+
+  // Previous torque for slew-rate limiting (max 1.0 Nm / ms)
+  Vector7d tau_prev_{Vector7d::Zero()};
 
   std::unique_ptr<franka_semantic_components::FrankaRobotModel> franka_robot_model_;
   const std::string state_interface_name_{"robot_state"};

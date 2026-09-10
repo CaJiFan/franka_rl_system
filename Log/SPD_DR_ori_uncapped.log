@@ -1,0 +1,477 @@
+Raw delta pos: [-0.75536364  0.951758    0.99428916]
+Safe target pos: [0.35       0.16677944 0.4       ]
+Target orientation (quat): [ 0.95979674  0.18829894 -0.14525173 -0.14911625]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [197.4748, 254.45795, 259.44882]
+Stiffness (Kp_ori): [5.2484183, 68.438675, 97.95214]
+--------------------------
+[INFO] [1788897834.180781288] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.6730252  -0.78762645  0.99520934]
+Safe target pos: [0.35       0.16284131 0.4       ]
+Target orientation (quat): [ 0.96259219  0.18643979 -0.14227216 -0.13570229]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [170.67595, 134.99716, 299.9135]
+Stiffness (Kp_ori): [35.795532, 31.57298, 85.38438]
+--------------------------
+[INFO] [1788897834.225439252] [rl_env_node]: 
+================================================================ OBS SNAPSHOT ================================================================
+  [00:06]  joint_pos      = [+0.0997  -0.4116  +0.1919  -2.4537  +0.4033  +1.7559  +1.2934]
+  [07:13]  cos(jnt_pos)   = [+0.9950  +0.9165  +0.9817  -0.7726  +0.9198  -0.1840  +0.2739]
+  [14:20]  sin(jnt_pos)   = [+0.0995  -0.4001  +0.1907  -0.6349  +0.3924  +0.9829  +0.9618]
+  [21:27]  joint_vel      = [-0.0405  -0.0146  +0.0096  -0.0436  +0.5274  +0.0159  +0.3804]
+  [28:34]  joint_acc      = [-1.7660  -0.4141  -1.2939  -2.3350  +22.9668  +0.1753  +21.4965]
+  [35:37]  eef_pos(TCP)   = [+0.3409  +0.1604  +0.3733]  (eraser tip)
+  [38:41]  eef_quat       = [+0.9581  +0.1976  -0.1404  -0.1527]  (flange xyzw)
+  [42:45]  eef_quat_site  = [+0.5864  -0.0407  -0.2576  -0.7669]  (grip-site xyzw)
+  [46]     contact        = 1  (|Fz|>2N)
+  [47:81]  markers (active=0):
+    M0 (active )  pos=[+0.4476  -0.0939  +0.1297]  g2m=[+0.1066  -0.2544  -0.2436]
+    M1 (pending)  pos=[+0.4923  -0.0389  +0.0968]  g2m=[+0.1514  -0.1993  -0.2764]
+    M2 (pending)  pos=[+0.5105  +0.0275  +0.0833]  g2m=[+0.1695  -0.1329  -0.2899]
+    M3 (pending)  pos=[+0.5325  +0.1000  +0.0670]  g2m=[+0.1915  -0.0605  -0.3062]
+    M4 (pending)  pos=[+0.5769  +0.1476  +0.0343]  g2m=[+0.2360  -0.0129  -0.3389]
+  [82:84]  g2active_wp    = [+0.1066  -0.2544  -0.2436]
+  ICRA FORCE METRICS      : Fz_mean= 2.64N  Fz_peak= 3.72N  Fz_violations(>10N)=0 ( 0.0%)
+  obs_dim  = 85
+=============================================================================================================================================
+[INFO] [1788897834.233574749] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.84828377 -0.34585673  0.9842627 ]
+Safe target pos: [0.35       0.16111203 0.4       ]
+Target orientation (quat): [ 0.96019637  0.18434378 -0.14850131 -0.14828238]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [53.86945, 128.26828, 15.592527]
+Stiffness (Kp_ori): [3.3021588, 84.52829, 64.148445]
+--------------------------
+[INFO] [1788897834.279004344] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.19484746 -0.9315865   0.9966438 ]
+Safe target pos: [0.35       0.15645409 0.4       ]
+Target orientation (quat): [ 0.95967794  0.18812432 -0.14564186 -0.14971956]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [66.40832, 27.80077, 299.95377]
+Stiffness (Kp_ori): [53.516308, 34.179104, 78.91303]
+--------------------------
+[INFO] [1788897834.330425201] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.18676794  0.5849129   0.9196248 ]
+Safe target pos: [0.35       0.15937866 0.4       ]
+Target orientation (quat): [ 0.96187792  0.18709767 -0.14280405 -0.13925636]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [141.00476, 272.23456, 292.81522]
+Stiffness (Kp_ori): [49.899307, 51.981804, 95.177734]
+--------------------------
+[INFO] [1788897834.377576705] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.61242646  0.29747176  0.9990051 ]
+Safe target pos: [0.35       0.16086602 0.4       ]
+Target orientation (quat): [ 0.96220663  0.1885442  -0.14084026 -0.13701644]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [77.03852, 231.63261, 294.6195]
+Stiffness (Kp_ori): [12.127343, 74.26607, 93.78854]
+--------------------------
+[INFO] [1788897834.432785060] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.63931245  0.9204602   0.99541163]
+Safe target pos: [0.35       0.16546832 0.4       ]
+Target orientation (quat): [ 0.95992937  0.18841182 -0.14489942 -0.14846125]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [132.33731, 209.63933, 293.50067]
+Stiffness (Kp_ori): [7.7210627, 67.06371, 98.41969]
+--------------------------
+[INFO] [1788897834.476898917] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.731247   -0.70963573  0.9947362 ]
+Safe target pos: [0.35       0.16192014 0.4       ]
+Target orientation (quat): [ 0.96300281  0.18607532 -0.14196995 -0.13358926]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [160.93214, 217.06783, 299.8401]
+Stiffness (Kp_ori): [46.52288, 46.063496, 89.06409]
+--------------------------
+[INFO] [1788897834.527241163] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.81146866 -0.7072473   0.98493767]
+Safe target pos: [0.35      0.1583839 0.4      ]
+Target orientation (quat): [ 0.96061273  0.18591897 -0.14616487 -0.14592175]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [94.40845, 140.79604, 15.921986]
+Stiffness (Kp_ori): [4.514739, 92.11559, 70.85781]
+--------------------------
+[INFO] [1788897834.577838101] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.46598744  0.35145926  0.9869776 ]
+Safe target pos: [0.35      0.1601412 0.4      ]
+Target orientation (quat): [ 0.96039201  0.18851229 -0.14397198 -0.14622713]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [48.64518, 201.74988, 299.54947]
+Stiffness (Kp_ori): [68.5209, 69.94026, 95.90104]
+--------------------------
+[INFO] [1788897834.626970844] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [ 0.2557727  -0.90126634  0.98596394]
+Safe target pos: [0.35127886 0.15563487 0.4       ]
+Target orientation (quat): [ 0.9599154   0.19151037 -0.14186437 -0.14751507]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [84.753075, 32.570923, 299.91748]
+Stiffness (Kp_ori): [77.29856, 31.150133, 94.01847]
+--------------------------
+[INFO] [1788897834.678178600] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.7439254   0.09657598  0.96257615]
+Safe target pos: [0.35       0.15611775 0.4       ]
+Target orientation (quat): [ 0.96200884  0.19033548 -0.13942419 -0.13737646]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [252.15115, 296.1304, 298.3558]
+Stiffness (Kp_ori): [16.778963, 74.98898, 87.65837]
+--------------------------
+[INFO] [1788897834.726969222] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.16912293  0.92293763  0.9967849 ]
+Safe target pos: [0.35       0.16073244 0.4       ]
+Target orientation (quat): [ 0.96000389  0.19148223 -0.14173462 -0.1470999 ]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [89.355415, 180.18214, 296.24423]
+Stiffness (Kp_ori): [15.57039, 81.80432, 98.98888]
+--------------------------
+[INFO] [1788897834.775153265] [rl_env_node]: 
+================================================================ OBS SNAPSHOT ================================================================
+  [00:06]  joint_pos      = [+0.0988  -0.4126  +0.2113  -2.4542  +0.3998  +1.7574  +1.3344]
+  [07:13]  cos(jnt_pos)   = [+0.9951  +0.9161  +0.9778  -0.7729  +0.9211  -0.1855  +0.2342]
+  [14:20]  sin(jnt_pos)   = [+0.0986  -0.4010  +0.2097  -0.6345  +0.3893  +0.9826  +0.9722]
+  [21:27]  joint_vel      = [+0.0159  -0.0018  +0.0026  +0.0572  -0.5855  +0.0188  -0.5162]
+  [28:34]  joint_acc      = [+0.0115  +0.3155  +4.2917  +1.2106  -15.2734  +0.0189  +2.1797]
+  [35:37]  eef_pos(TCP)   = [+0.3388  +0.1650  +0.3727]  (eraser tip)
+  [38:41]  eef_quat       = [+0.9603  +0.1904  -0.1428  -0.1454]  (flange xyzw)
+  [42:45]  eef_quat_site  = [+0.5925  -0.0477  -0.2536  -0.7631]  (grip-site xyzw)
+  [46]     contact        = 1  (|Fz|>2N)
+  [47:81]  markers (active=0):
+    M0 (active )  pos=[+0.4476  -0.0939  +0.1297]  g2m=[+0.1087  -0.2589  -0.2430]
+    M1 (pending)  pos=[+0.4923  -0.0389  +0.0968]  g2m=[+0.1535  -0.2039  -0.2758]
+    M2 (pending)  pos=[+0.5105  +0.0275  +0.0833]  g2m=[+0.1716  -0.1375  -0.2893]
+    M3 (pending)  pos=[+0.5325  +0.1000  +0.0670]  g2m=[+0.1936  -0.0650  -0.3057]
+    M4 (pending)  pos=[+0.5769  +0.1476  +0.0343]  g2m=[+0.2381  -0.0174  -0.3384]
+  [82:84]  g2active_wp    = [+0.1087  -0.2589  -0.2430]
+  ICRA FORCE METRICS      : Fz_mean= 2.65N  Fz_peak= 3.72N  Fz_violations(>10N)=0 ( 0.0%)
+  obs_dim  = 85
+=============================================================================================================================================
+[INFO] [1788897834.777359319] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.5624693  -0.26036286  0.9920536 ]
+Safe target pos: [0.35       0.15943062 0.4       ]
+Target orientation (quat): [ 0.9628307   0.18921195 -0.139189   -0.1333503 ]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [125.184654, 268.9978, 294.92477]
+Stiffness (Kp_ori): [45.933628, 86.40592, 93.452934]
+--------------------------
+[INFO] [1788897834.827692976] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.5577757   0.70228183  0.9975841 ]
+Safe target pos: [0.35       0.16294203 0.4       ]
+Target orientation (quat): [ 0.96086812  0.18851286 -0.14313464 -0.14390216]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [39.962532, 267.65335, 23.757166]
+Stiffness (Kp_ori): [4.862157, 73.52701, 91.0005]
+--------------------------
+[INFO] [1788897834.877338288] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.53206885  0.5407648   0.9996078 ]
+Safe target pos: [0.35       0.16564585 0.4       ]
+Target orientation (quat): [ 0.96061282  0.19090336 -0.14123091 -0.14433551]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [69.94278, 179.62451, 295.72766]
+Stiffness (Kp_ori): [20.48566, 76.40087, 95.28168]
+--------------------------
+[INFO] [1788897834.933346197] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [ 0.73288155 -0.693145    0.9402921 ]
+Safe target pos: [0.35366441 0.16218013 0.4       ]
+Target orientation (quat): [ 0.95940748  0.19200397 -0.1422918  -0.14974917]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [72.51481, 68.70829, 299.9023]
+Stiffness (Kp_ori): [55.125584, 54.431416, 95.10544]
+--------------------------
+[INFO] [1788897834.990449816] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.4996     -0.8308064   0.99648356]
+Safe target pos: [0.35116641 0.1580261  0.4       ]
+Target orientation (quat): [ 0.95735602  0.19063886 -0.1474866  -0.15929212]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [195.43594, 298.73077, 19.479752]
+Stiffness (Kp_ori): [13.141773, 98.93985, 63.492302]
+--------------------------
+[INFO] [1788897835.026984151] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [0.6306088  0.65628517 0.9970995 ]
+Safe target pos: [0.35431945 0.16130752 0.4       ]
+Target orientation (quat): [ 0.95563316  0.19212934 -0.14937545 -0.16594744]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [46.42562, 129.59299, 299.42416]
+Stiffness (Kp_ori): [39.20358, 94.296875, 98.20794]
+--------------------------
+[INFO] [1788897835.089498608] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.38614035 -0.06939173  0.9968772 ]
+Safe target pos: [0.35238875 0.16096056 0.4       ]
+Target orientation (quat): [ 0.95906094  0.18981872 -0.14508468 -0.15205722]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [99.6465, 244.27063, 298.2909]
+Stiffness (Kp_ori): [39.216984, 69.655624, 96.16784]
+--------------------------
+[INFO] [1788897835.129242067] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.1259085   0.54019666  0.9847815 ]
+Safe target pos: [0.35175921 0.16366155 0.4       ]
+Target orientation (quat): [ 0.95860161  0.19198086 -0.14379134 -0.15346124]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [213.32437, 295.16895, 259.70004]
+Stiffness (Kp_ori): [14.21785, 63.61368, 94.3056]
+--------------------------
+[INFO] [1788897835.182821366] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.6827482  -0.14643943  0.9989898 ]
+Safe target pos: [0.35       0.16292935 0.4       ]
+Target orientation (quat): [ 0.95979786  0.19264438 -0.1409649  -0.14766554]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [125.21838, 245.14517, 292.53296]
+Stiffness (Kp_ori): [16.29332, 91.79166, 91.68014]
+--------------------------
+[INFO] [1788897835.231041181] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [0.5772604 0.7025951 0.9962498]
+Safe target pos: [0.3528863  0.16644233 0.4       ]
+Target orientation (quat): [ 0.95825753  0.19377131 -0.14266718 -0.15440616]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [27.711811, 169.97598, 299.09363]
+Stiffness (Kp_ori): [50.026268, 92.331825, 98.41341]
+--------------------------
+[INFO] [1788897835.277078846] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.74057806  0.16950238  0.9472177 ]
+Safe target pos: [0.35       0.16728984 0.4       ]
+Target orientation (quat): [ 0.96081932  0.19202864 -0.13977901 -0.1428743 ]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [231.40005, 295.0339, 297.42392]
+Stiffness (Kp_ori): [35.042088, 68.050934, 91.20167]
+--------------------------
+[INFO] [1788897835.325102481] [rl_env_node]: 
+================================================================ OBS SNAPSHOT ================================================================
+  [00:06]  joint_pos      = [+0.0986  -0.4117  +0.2077  -2.4537  +0.4104  +1.7559  +1.3192]
+  [07:13]  cos(jnt_pos)   = [+0.9951  +0.9165  +0.9785  -0.7726  +0.9170  -0.1841  +0.2490]
+  [14:20]  sin(jnt_pos)   = [+0.0984  -0.4001  +0.2063  -0.6349  +0.3990  +0.9829  +0.9685]
+  [21:27]  joint_vel      = [-0.0183  -0.0329  -0.0608  -0.0239  +0.4162  -0.0199  +0.3468]
+  [28:34]  joint_acc      = [-0.7313  -0.7753  -2.5791  -1.9277  +20.7980  -0.7774  +17.4048]
+  [35:37]  eef_pos(TCP)   = [+0.3387  +0.1661  +0.3727]  (eraser tip)
+  [38:41]  eef_quat       = [+0.9595  +0.1907  -0.1435  -0.1499]  (flange xyzw)
+  [42:45]  eef_quat_site  = [+0.5888  -0.0478  -0.2547  -0.7656]  (grip-site xyzw)
+  [46]     contact        = 1  (|Fz|>2N)
+  [47:81]  markers (active=0):
+    M0 (active )  pos=[+0.4476  -0.0939  +0.1297]  g2m=[+0.1089  -0.2601  -0.2430]
+    M1 (pending)  pos=[+0.4923  -0.0389  +0.0968]  g2m=[+0.1537  -0.2050  -0.2759]
+    M2 (pending)  pos=[+0.5105  +0.0275  +0.0833]  g2m=[+0.1718  -0.1386  -0.2894]
+    M3 (pending)  pos=[+0.5325  +0.1000  +0.0670]  g2m=[+0.1938  -0.0662  -0.3057]
+    M4 (pending)  pos=[+0.5769  +0.1476  +0.0343]  g2m=[+0.2383  -0.0186  -0.3384]
+  [82:84]  g2active_wp    = [+0.1089  -0.2601  -0.2430]
+  ICRA FORCE METRICS      : Fz_mean= 2.64N  Fz_peak= 3.72N  Fz_violations(>10N)=0 ( 0.0%)
+  obs_dim  = 85
+=============================================================================================================================================
+[INFO] [1788897835.327076573] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.8776076   0.34943533  0.992002  ]
+Safe target pos: [0.35       0.16903701 0.4       ]
+Target orientation (quat): [ 0.95793309  0.18574905 -0.15132085 -0.15799837]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [62.232723, 178.59367, 22.350475]
+Stiffness (Kp_ori): [3.5370066, 85.90696, 82.96493]
+--------------------------
+[INFO] [1788897835.377468981] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.60050035  0.6215385   0.9875512 ]
+Safe target pos: [0.35       0.17214471 0.4       ]
+Target orientation (quat): [ 0.95887427  0.18714864 -0.14810706 -0.1536223 ]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [80.03845, 238.2532, 299.1202]
+Stiffness (Kp_ori): [49.141, 68.66189, 98.09292]
+--------------------------
+[INFO] [1788897835.429162190] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [ 0.48281717 -0.9423933   0.96292925]
+Safe target pos: [0.35241409 0.16743274 0.4       ]
+Target orientation (quat): [ 0.95882136  0.18983206 -0.14551523 -0.1531362 ]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [191.86656, 15.115322, 299.97717]
+Stiffness (Kp_ori): [59.888306, 17.952393, 96.95537]
+--------------------------
+[INFO] [1788897835.485581309] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.5716455  -0.7910059   0.99500346]
+Safe target pos: [0.35       0.16347771 0.4       ]
+Target orientation (quat): [ 0.95643744  0.18725548 -0.15271878 -0.16382854]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [248.17293, 299.15656, 25.704456]
+Stiffness (Kp_ori): [14.883508, 98.77444, 73.97368]
+--------------------------
+[INFO] [1788897835.528466260] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [0.7072797  0.12770581 0.9959223 ]
+Safe target pos: [0.3535364  0.16411624 0.4       ]
+Target orientation (quat): [ 0.95504802  0.19032329 -0.1523857  -0.16863841]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [19.35336, 124.80985, 299.7306]
+Stiffness (Kp_ori): [54.514793, 89.61049, 97.180824]
+--------------------------
+[INFO] [1788897835.577311239] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.4980383  0.0615418  0.9906323]
+Safe target pos: [0.35104621 0.16442395 0.4       ]
+Target orientation (quat): [ 0.95496078  0.19361785 -0.14922846 -0.16820492]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [247.82231, 297.8867, 279.09628]
+Stiffness (Kp_ori): [28.553312, 83.22183, 93.18393]
+--------------------------
+[INFO] [1788897835.628760488] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.08786875  0.50627816  0.9979162 ]
+Safe target pos: [0.35060686 0.16695534 0.4       ]
+Target orientation (quat): [ 0.95574367  0.19473196 -0.14654904 -0.16479342]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [44.645878, 250.3603, 281.51874]
+Stiffness (Kp_ori): [8.246907, 54.730103, 96.79432]
+--------------------------
+[INFO] [1788897835.676785030] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.48908526 -0.42605245  0.9987409 ]
+Safe target pos: [0.35       0.16482508 0.4       ]
+Target orientation (quat): [ 0.95379324  0.19719792 -0.14801464 -0.17170642]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [167.99352, 272.0875, 28.226585]
+Stiffness (Kp_ori): [9.399723, 96.61057, 92.843185]
+--------------------------
+[INFO] [1788897835.727173938] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [ 0.36599123 -0.9411812   0.97809076]
+Safe target pos: [0.35182996 0.16011917 0.4       ]
+Target orientation (quat): [ 0.9522431   0.19997531 -0.14844507 -0.17665507]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [253.1614, 13.03039, 299.99625]
+Stiffness (Kp_ori): [23.335999, 24.352888, 64.2003]
+--------------------------
+[INFO] [1788897835.777212024] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.7442014  -0.93247193  0.9952948 ]
+Safe target pos: [0.35       0.15545681 0.4       ]
+Target orientation (quat): [ 0.95018101  0.20047082 -0.15231413 -0.18376044]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [88.85754, 160.46208, 12.555889]
+Stiffness (Kp_ori): [4.055237, 94.56753, 53.008446]
+--------------------------
+[INFO] [1788897835.825246959] [rl_env_node]: 
+================================================================ OBS SNAPSHOT ================================================================
+  [00:06]  joint_pos      = [+0.0961  -0.4089  +0.2168  -2.4533  +0.4285  +1.7479  +1.3118]
+  [07:13]  cos(jnt_pos)   = [+0.9954  +0.9176  +0.9766  -0.7724  +0.9096  -0.1762  +0.2561]
+  [14:20]  sin(jnt_pos)   = [+0.0960  -0.3976  +0.2151  -0.6352  +0.4155  +0.9844  +0.9666]
+  [21:27]  joint_vel      = [+0.0006  +0.0018  -0.3016  -0.0054  +0.2840  -0.0470  -0.4808]
+  [28:34]  joint_acc      = [+0.4333  -0.1470  -8.7124  -0.4427  +7.4091  +0.4888  -17.8411]
+  [35:37]  eef_pos(TCP)   = [+0.3362  +0.1706  +0.3720]  (eraser tip)
+  [38:41]  eef_quat       = [+0.9569  +0.1939  -0.1483  -0.1576]  (flange xyzw)
+  [42:45]  eef_quat_site  = [+0.5818  -0.0487  -0.2609  -0.7688]  (grip-site xyzw)
+  [46]     contact        = 0  (|Fz|>2N)
+  [47:81]  markers (active=0):
+    M0 (active )  pos=[+0.4476  -0.0939  +0.1297]  g2m=[+0.1113  -0.2645  -0.2423]
+    M1 (pending)  pos=[+0.4923  -0.0389  +0.0968]  g2m=[+0.1561  -0.2095  -0.2752]
+    M2 (pending)  pos=[+0.5105  +0.0275  +0.0833]  g2m=[+0.1742  -0.1431  -0.2887]
+    M3 (pending)  pos=[+0.5325  +0.1000  +0.0670]  g2m=[+0.1962  -0.0706  -0.3050]
+    M4 (pending)  pos=[+0.5769  +0.1476  +0.0343]  g2m=[+0.2407  -0.0231  -0.3377]
+  [82:84]  g2active_wp    = [+0.1113  -0.2645  -0.2423]
+  ICRA FORCE METRICS      : Fz_mean= 2.70N  Fz_peak= 4.36N  Fz_violations(>10N)=0 ( 0.0%)
+  obs_dim  = 85
+=============================================================================================================================================
+[INFO] [1788897835.829228077] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [ 0.65457654 -0.40871012  0.99491   ]
+Safe target pos: [0.35327288 0.15341326 0.4       ]
+Target orientation (quat): [ 0.94892345  0.20323217 -0.1522585  -0.18723866]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [35.756966, 89.753555, 299.91977]
+Stiffness (Kp_ori): [53.302, 91.731705, 90.81468]
+--------------------------
+[INFO] [1788897835.878365445] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.02391207 -0.1734786   0.9990252 ]
+Safe target pos: [0.35315332 0.15254587 0.4       ]
+Target orientation (quat): [ 0.94902689  0.20614587 -0.14913072 -0.18604265]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [113.78969, 268.08112, 145.8208]
+Stiffness (Kp_ori): [18.696253, 76.24194, 96.123344]
+--------------------------
+[INFO] [1788897835.933390086] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [ 0.6025162 -0.9250589  0.9893812]
+Safe target pos: [0.3561659  0.14792057 0.4       ]
+Target orientation (quat): [ 0.95060472  0.20655278 -0.14537423 -0.18042437]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [206.87547, 14.721501, 299.9889]
+Stiffness (Kp_ori): [47.080715, 13.324903, 94.3984]
+--------------------------
+[INFO] [1788897835.977544868] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.63287866 -0.9023124   0.9969981 ]
+Safe target pos: [0.35300151 0.14340901 0.4       ]
+Target orientation (quat): [ 0.94740169  0.19971005 -0.15917824 -0.19289431]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [276.84717, 299.12238, 26.887136]
+Stiffness (Kp_ori): [20.21863, 99.682884, 78.67364]
+--------------------------
+[INFO] [1788897836.041167963] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [0.7272874  0.08289552 0.9954498 ]
+Safe target pos: [0.35663795 0.14382349 0.4       ]
+Target orientation (quat): [ 0.94576187  0.1984509  -0.16417603 -0.19798475]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [52.066692, 102.73041, 299.8337]
+Stiffness (Kp_ori): [54.45357, 96.847496, 91.62214]
+--------------------------
+[INFO] [1788897836.078501127] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.18976367 -0.43322062  0.99182355]
+Safe target pos: [0.35568913 0.14165739 0.4       ]
+Target orientation (quat): [ 0.95132003  0.19417427 -0.15625661 -0.18130202]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [169.00566, 270.73352, 297.5357]
+Stiffness (Kp_ori): [30.087687, 79.296, 92.9216]
+--------------------------
+[INFO] [1788897836.127136940] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.74503547  0.10786605  0.99745107]
+Safe target pos: [0.35196395 0.14219672 0.4       ]
+Target orientation (quat): [ 0.9484177   0.19202902 -0.16485186 -0.1909256 ]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [60.876835, 211.02502, 12.72596]
+Stiffness (Kp_ori): [7.8402534, 91.14117, 90.25467]
+--------------------------
+[INFO] [1788897836.177327256] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.43960583  0.728642    0.99955034]
+Safe target pos: [0.35       0.14583993 0.4       ]
+Target orientation (quat): [ 0.9491539   0.1951755  -0.15994512 -0.18823111]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [90.656334, 156.84203, 297.18073]
+Stiffness (Kp_ori): [23.206455, 73.050964, 96.57822]
+--------------------------
+[INFO] [1788897836.233349745] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [0.12492085 0.7276052  0.9834616 ]
+Safe target pos: [0.3506246  0.14947795 0.4       ]
+Target orientation (quat): [ 0.9487842   0.19741514 -0.15845898 -0.18901469]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [61.83593, 178.34048, 297.96664]
+Stiffness (Kp_ori): [56.396103, 72.714294, 98.12475]
+--------------------------
+[INFO] [1788897836.281154707] [rl_env_node]: 
+--- ACTION DIAGNOSTICS ---
+Raw delta pos: [-0.5274549  -0.97980225  0.97476137]
+Safe target pos: [0.35       0.14457894 0.4       ]
+Target orientation (quat): [ 0.95099433  0.19787947 -0.15318437 -0.18162612]
+Target tilt angle from normal: 25.21 deg
+Stiffness (Kp_pos diag): [203.02516, 16.37754, 299.9801]
+Stiffness (Kp_ori): [47.595802, 10.0216465, 67.539856]
